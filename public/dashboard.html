@@ -273,7 +273,7 @@ function initApp(){
     if(t.dataset.tab==='clients') loadClients();
   }));
   loadStats(); loadUnsolved();
-  setInterval(()=>{ loadStats(); loadUnsolved(); }, 15000);
+  setInterval(()=>{ loadStats(); loadUnsolved(); }, 2000);
 }
 
 async function loadStats(){
