@@ -272,8 +272,32 @@ app.delete('/admin/clients/:apiKey', (req, res) => {
   res.json({ ok: true });
 });
 
+// Auto-create default client from env variable
+const DEFAULT_KEY = process.env.DEFAULT_CLIENT_KEY;
+if (DEFAULT_KEY) {
+  const clients = getClients();
+  if (!clients[DEFAULT_KEY]) {
+    clients[DEFAULT_KEY] = {
+      name: process.env.DEFAULT_CLIENT_NAME || 'Admin',
+      apiKey: DEFAULT_KEY,
+      plan: 9999999,
+      active: true,
+      createdAt: new Date().toISOString(),
+      lastSeen: null
+    };
+    saveClients(clients);
+    console.log('Default client created:', DEFAULT_KEY);
+  }
+}
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`SquareNet Server v2.0 on port ${PORT}`);
+  console.log(`SquareNet Server v2.1 on port ${PORT}`);
   console.log(`Admin pass: ${ADMIN_PASS}`);
+  console.log(`Data dir: ${DATA_DIR}`);
+  // Log what's in data dir
+  try {
+    const files = require('fs').readdirSync(DATA_DIR);
+    console.log('Data files:', files);
+  } catch(e) { console.log('Data dir empty or missing'); }
 });
