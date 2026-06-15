@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SquareNet Admin Dashboard</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#09081a;--card:#111028;--panel:#16143a;--border:#2a2560;
+  --accent:#7c3aed;--accent2:#3b82f6;--text:#e0daf5;--muted:#6b6890;
+  --green:#22c55e;--red:#ef4444;--amber:#f59e0b;
+}
+body{background:var(--bg);color:var(--text);font-family:'Segoe UI',sans-serif;font-size:13px}
+a{color:var(--accent2);text-decoration:none}
+
+/* LOGIN */
+.login-wrap{display:flex;align-items:center;justify-content:center;height:100vh}
+.login-box{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:40px;width:340px;text-align:center}
+.login-box h1{font-size:20px;margin-bottom:6px;background:linear-gradient(135deg,#7c3aed,#3b82f6);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.login-box p{color:var(--muted);margin-bottom:24px;font-size:12px}
+.login-box input{width:100%;background:var(--panel);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:10px 14px;font-size:13px;outline:none;margin-bottom:12px}
+.login-box input:focus{border-color:var(--accent)}
+.login-err{color:var(--red);font-size:12px;margin-bottom:8px}
+
+/* LAYOUT */
+.app{display:none;flex-direction:column;height:100vh}
+.app.show{display:flex}
+.header{background:var(--card);border-bottom:1px solid var(--border);padding:12px 20px;display:flex;align-items:center;gap:12px}
+.header h1{font-size:15px;font-weight:700;background:linear-gradient(135deg,#7c3aed,#3b82f6);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;flex:1}
+.hstats{display:flex;gap:20px}
+.hstat{text-align:center}
+.hstat-val{font-size:20px;font-weight:700;color:#a78bfa}
+.hstat-lbl{font-size:10px;color:var(--muted)}
+
+/* TABS */
+.tabs{background:var(--card);border-bottom:1px solid var(--border);display:flex;padding:0 20px}
+.tab{padding:10px 16px;cursor:pointer;font-size:13px;font-weight:500;color:var(--muted);border-bottom:2px solid transparent}
+.tab.active{color:#a78bfa;border-bottom-color:var(--accent)}
+.tab:hover{color:var(--text)}
+
+/* PANES */
+.panes{flex:1;overflow:hidden;display:flex;flex-direction:column}
+.pane{display:none;flex:1;overflow:hidden;flex-direction:column}
+.pane.active{display:flex}
+
+/* TOOLBAR */
+.toolbar{background:var(--card);border-bottom:1px solid var(--border);padding:10px 20px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;flex-shrink:0}
+.search{background:var(--panel);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:7px 12px;font-size:12px;width:200px;outline:none}
+.search:focus{border-color:var(--accent)}
+.spacer{flex:1}
+
+/* BUTTONS */
+.btn{padding:7px 14px;border-radius:8px;border:none;cursor:pointer;font-size:12px;font-weight:600;transition:opacity .15s}
+.btn:hover{opacity:.85}
+.btn-primary{background:linear-gradient(135deg,#7c3aed,#3b82f6);color:#fff}
+.btn-ghost{background:var(--panel);border:1px solid var(--border);color:#a78bfa}
+.btn-danger{background:var(--red);color:#fff}
+.btn-green{background:var(--green);color:#fff}
+.btn-amber{background:var(--amber);color:#000}
+
+/* GRID */
+.grid-scroll{flex:1;overflow-y:auto;padding:16px 20px}
+.grid-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden;cursor:pointer;transition:border-color .15s}
+.card:hover{border-color:var(--accent)}
+.card-img{width:100%;aspect-ratio:1;background:#0a0916;overflow:hidden;position:relative}
+.card-img img{width:100%;height:100%;object-fit:cover}
+.badge{position:absolute;top:6px;left:6px;background:rgba(124,58,237,.85);color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:20px}
+.badge2{position:absolute;top:6px;right:6px;background:rgba(34,197,94,.85);color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:20px}
+.card-info{padding:8px 10px 10px}
+.card-obj{font-size:12px;font-weight:700;color:#c4b5fd;text-transform:capitalize;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card-meta{font-size:10px;color:var(--muted);margin-top:3px}
+.no-items{grid-column:1/-1;text-align:center;padding:60px 20px;color:var(--muted)}
+
+/* MODAL */
+.overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:1000;align-items:center;justify-content:center;padding:20px}
+.overlay.open{display:flex}
+.modal{background:var(--card);border:1px solid var(--border);border-radius:16px;width:100%;max-width:640px;max-height:90vh;display:flex;flex-direction:column;overflow:hidden}
+.modal-head{padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
+.modal-head h2{font-size:14px;font-weight:700;color:#a78bfa;flex:1}
+.close-btn{background:none;border:none;cursor:pointer;color:var(--muted);font-size:20px;line-height:1}
+.close-btn:hover{color:#fff}
+.modal-body{flex:1;overflow-y:auto;padding:18px}
+.modal-foot{padding:12px 20px;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px}
+
+/* TRAIN IMAGE + GRID */
+.task-label{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-bottom:14px}
+.task-label .lbl{font-size:10px;color:var(--muted);margin-bottom:4px}
+.task-label .val{font-size:14px;font-weight:700;color:#c4b5fd;text-transform:capitalize}
+.grid-ctrl{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap}
+.grid-ctrl label{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px}
+.grid-ctrl input[type=number]{width:50px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:4px 8px;font-size:12px;outline:none}
+.sel-count{font-size:12px;color:#a78bfa;font-weight:600}
+.img-wrap{position:relative;display:block;border:2px solid var(--border);border-radius:10px;overflow:hidden;margin-bottom:12px;max-width:500px;margin-left:auto;margin-right:auto}
+.img-wrap img{display:block;width:100%;height:auto}
+.grid-ov{position:absolute;top:0;left:0;width:100%;height:100%;display:grid;cursor:pointer}
+.cell{border:1px solid rgba(255,255,255,.12);transition:background .1s;position:relative}
+.cell:hover{background:rgba(124,58,237,.25)!important}
+.cell.sel{background:rgba(124,58,237,.55)!important;border-color:#a78bfa}
+.cell.sel::after{content:'✓';position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#a78bfa;font-size:13px;font-weight:900;pointer-events:none}
+
+/* CLIENTS */
+.client-list{flex:1;overflow-y:auto;padding:16px 20px}
+.client-item{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px 16px;margin-bottom:8px;display:flex;align-items:center;gap:12px}
+.client-name{font-size:13px;font-weight:700;color:#c4b5fd;flex:1}
+.client-key{font-size:11px;color:var(--muted);font-family:monospace;background:var(--panel);padding:3px 8px;border-radius:6px;word-break:break-all}
+.client-seen{font-size:11px;color:var(--muted);white-space:nowrap}
+
+/* TOAST */
+.toast{position:fixed;bottom:20px;right:20px;z-index:9999;padding:12px 18px;border-radius:10px;font-size:13px;color:#fff;box-shadow:0 4px 20px rgba(0,0,0,.4);animation:slideIn .3s ease}
+@keyframes slideIn{from{transform:translateX(120%);opacity:0}to{transform:translateX(0);opacity:1}}
+.toast-info{background:linear-gradient(135deg,#5c35d4,#3b82f6)}
+.toast-ok{background:linear-gradient(135deg,#16a34a,#15803d)}
+.toast-err{background:linear-gradient(135deg,#dc2626,#991b1b)}
+
+::-webkit-scrollbar{width:5px}
+::-webkit-scrollbar-track{background:var(--bg)}
+::-webkit-scrollbar-thumb{background:#2d2558;border-radius:3px}
+</style>
+</head>
+<body>
+
+<!-- LOGIN -->
+<div class="login-wrap" id="login-wrap">
+  <div class="login-box">
+    <h1>🔲 SquareNet Admin</h1>
+    <p>Central Training Dashboard</p>
+    <div class="login-err" id="login-err"></div>
+    <input type="text" id="server-url" placeholder="Server URL (e.g. https://xxx.railway.app)" value="">
+    <input type="password" id="admin-pass" placeholder="Admin Password" value="">
+    <button class="btn btn-primary" style="width:100%;padding:10px" onclick="doLogin()">Login</button>
+  </div>
+</div>
+
+<!-- APP -->
+<div class="app" id="app">
+  <div class="header">
+    <span>🔲</span>
+    <h1>SquareNet Admin Dashboard</h1>
+    <div class="hstats">
+      <div class="hstat"><div class="hstat-val" id="hs-unsolved">0</div><div class="hstat-lbl">Unsolved</div></div>
+      <div class="hstat"><div class="hstat-val" id="hs-trained">0</div><div class="hstat-lbl">Trained</div></div>
+      <div class="hstat"><div class="hstat-val" id="hs-clients">0</div><div class="hstat-lbl">Clients</div></div>
+      <div class="hstat"><div class="hstat-val" id="hs-sqkb">0</div><div class="hstat-lbl">SqKB</div></div>
+    </div>
+    <button class="btn btn-ghost" onclick="loadStats()">🔄</button>
+    <button class="btn btn-danger" style="font-size:11px" onclick="doLogout()">Logout</button>
+  </div>
+
+  <div class="tabs">
+    <div class="tab active" data-tab="unsolved">📥 Unsolved</div>
+    <div class="tab" data-tab="trained">✅ Trained</div>
+    <div class="tab" data-tab="clients">👥 Clients</div>
+  </div>
+
+  <div class="panes">
+
+    <!-- UNSOLVED -->
+    <div class="pane active" id="pane-unsolved">
+      <div class="toolbar">
+        <input class="search" id="search-unsolved" placeholder="🔍 Search..." oninput="renderUnsolved()">
+        <div class="spacer"></div>
+        <button class="btn btn-ghost" onclick="loadUnsolved()">🔄 Refresh</button>
+      </div>
+      <div class="grid-scroll">
+        <div class="grid-list" id="unsolved-list">
+          <div class="no-items"><p>Loading...</p></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TRAINED -->
+    <div class="pane" id="pane-trained">
+      <div class="toolbar">
+        <input class="search" id="search-trained" placeholder="🔍 Search..." oninput="renderTrained()">
+        <div class="spacer"></div>
+        <button class="btn btn-ghost" onclick="loadTrained()">🔄 Refresh</button>
+      </div>
+      <div class="grid-scroll">
+        <div class="grid-list" id="trained-list">
+          <div class="no-items"><p>Loading...</p></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- CLIENTS -->
+    <div class="pane" id="pane-clients">
+      <div class="toolbar">
+        <input id="new-client-name" class="search" placeholder="Client name (e.g. PC-1, Ali)">
+        <button class="btn btn-primary" onclick="createClient()">➕ Add Client</button>
+        <div class="spacer"></div>
+        <button class="btn btn-ghost" onclick="loadClients()">🔄 Refresh</button>
+      </div>
+      <div class="client-list" id="client-list">
+        <div class="no-items"><p>Loading...</p></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- TRAIN MODAL -->
+<div class="overlay" id="modal">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="modal-title">Train Task</h2>
+      <button class="close-btn" onclick="closeModal()">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="task-label">
+        <div class="lbl">Task:</div>
+        <div class="val" id="modal-obj">—</div>
+      </div>
+      <div class="grid-ctrl">
+        <label>Rows: <input type="number" id="g-rows" value="3" min="2" max="10" onchange="buildGrid()"></label>
+        <label>Cols: <input type="number" id="g-cols" value="3" min="2" max="10" onchange="buildGrid()"></label>
+        <button class="btn btn-ghost" style="padding:4px 10px" onclick="buildGrid()">Apply</button>
+        <div class="spacer"></div>
+        <span class="sel-count" id="sel-count">0 selected</span>
+        <button class="btn btn-ghost" style="padding:4px 10px" onclick="clearSel()">Clear</button>
+      </div>
+      <div class="img-wrap" id="img-wrap">
+        <img id="modal-img" src="" alt="">
+        <div class="grid-ov" id="grid-ov"></div>
+      </div>
+      <div style="font-size:11px;color:var(--muted)">💡 Object wale squares click karo</div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-amber" onclick="saveTrain(true)">🚫 Object Not Found</button>
+      <div class="spacer"></div>
+      <button class="btn btn-ghost" onclick="closeModal()">Skip</button>
+      <button class="btn btn-green" onclick="saveTrain(false)">💾 Save & Train</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────
+let SERVER = localStorage.getItem('sn_server') || '';
+let PASS   = localStorage.getItem('sn_pass')   || '';
+let unsolvedData = [];
+let trainedData  = [];
+let clientsData  = {};
+let modalEntry   = null;
+let selectedCells = new Set();
+let taskCounter  = 0;
+
+// ── Login ───────────────────────────────────────────────────────
+async function doLogin() {
+  SERVER = document.getElementById('server-url').value.trim().replace(/\/$/,'');
+  PASS   = document.getElementById('admin-pass').value.trim();
+  if (!SERVER || !PASS) { showErr('URL aur password dono chahiye'); return; }
+  try {
+    const r = await api('POST', '/admin/login', { password: PASS });
+    if (r.ok) {
+      localStorage.setItem('sn_server', SERVER);
+      localStorage.setItem('sn_pass', PASS);
+      document.getElementById('login-wrap').style.display = 'none';
+      document.getElementById('app').classList.add('show');
+      initApp();
+    } else {
+      showErr('Galat password');
+    }
+  } catch(e) { showErr('Server se connect nahi hua: ' + e.message); }
+}
+
+function showErr(msg) { document.getElementById('login-err').textContent = msg; }
+
+function doLogout() {
+  localStorage.removeItem('sn_pass');
+  location.reload();
+}
+
+// Auto-login if saved
+window.onload = () => {
+  const savedServer = localStorage.getItem('sn_server');
+  const savedPass   = localStorage.getItem('sn_pass');
+  if (savedServer) document.getElementById('server-url').value = savedServer;
+  if (savedServer && savedPass) {
+    SERVER = savedServer; PASS = savedPass;
+    document.getElementById('admin-pass').value = savedPass;
+    doLogin();
+  }
+  document.getElementById('admin-pass').addEventListener('keypress', e => {
+    if (e.key === 'Enter') doLogin();
+  });
+};
+
+// ── API Helper ───────────────────────────────────────────────────
+async function api(method, path, body) {
+  const opts = {
+    method,
+    headers: { 'Content-Type': 'application/json', 'x-admin-pass': PASS }
+  };
+  if (body) opts.body = JSON.stringify(body);
+  const r = await fetch(SERVER + path, opts);
+  return r.json();
+}
+
+// ── Init ─────────────────────────────────────────────────────────
+function initApp() {
+  // Tab switching
+  document.querySelectorAll('.tab').forEach(t => {
+    t.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+      document.querySelectorAll('.pane').forEach(x => x.classList.remove('active'));
+      t.classList.add('active');
+      document.getElementById('pane-' + t.dataset.tab).classList.add('active');
+    });
+  });
+  loadStats();
+  loadUnsolved();
+  // Auto refresh every 15s
+  setInterval(() => { loadStats(); loadUnsolved(); }, 15000);
+}
+
+// ── Stats ────────────────────────────────────────────────────────
+async function loadStats() {
+  try {
+    const d = await api('GET', '/admin/stats');
+    document.getElementById('hs-unsolved').textContent = d.unsolved || 0;
+    document.getElementById('hs-trained').textContent  = d.trained  || 0;
+    document.getElementById('hs-clients').textContent  = d.clients  || 0;
+    document.getElementById('hs-sqkb').textContent     = d.squareKB || 0;
+    taskCounter = d.trained || 0;
+  } catch(e) {}
+}
+
+// ── Unsolved ────────────────────────────────────────────────────
+async function loadUnsolved() {
+  try {
+    const d = await api('GET', '/admin/unsolved');
+    unsolvedData = d.list || [];
+    renderUnsolved();
+  } catch(e) { console.error(e); }
+}
+
+function renderUnsolved() {
+  const q = document.getElementById('search-unsolved').value.toLowerCase();
+  const items = unsolvedData.filter(e =>
+    !q || (e.objectName||'').toLowerCase().includes(q)
+  );
+  const el = document.getElementById('unsolved-list');
+  if (!items.length) { el.innerHTML = '<div class="no-items"><p>Koi unsolved task nahi 🎉</p></div>'; return; }
+  el.innerHTML = items.map((e,i) => `
+    <div class="card" onclick='openModal(${JSON.stringify(e).replace(/'/g,"&#39;")})'>
+      <div class="card-img">
+        <img src="${e.imageSrc||''}" loading="lazy">
+        <div class="badge">${i+1}</div>
+      </div>
+      <div class="card-info">
+        <div class="card-obj">🔍 ${e.objectName||'?'}</div>
+        <div class="card-meta">${fmtDate(e.submittedAt)}</div>
+      </div>
+    </div>
+  `).join('');
+}
+
+// ── Trained ─────────────────────────────────────────────────────
+async function loadTrained() {
+  try {
+    const d = await api('GET', '/admin/trained');
+    trainedData = d.list || [];
+    renderTrained();
+  } catch(e) {}
+}
+
+function renderTrained() {
+  const q = document.getElementById('search-trained').value.toLowerCase();
+  const items = trainedData.filter(e =>
+    !q || (e.objectName||'').toLowerCase().includes(q)
+  );
+  const el = document.getElementById('trained-list');
+  if (!items.length) { el.innerHTML = '<div class="no-items"><p>Koi trained entry nahi</p></div>'; return; }
+  el.innerHTML = items.map(e => `
+    <div class="card" onclick='openModal(${JSON.stringify(e).replace(/'/g,"&#39;")})'>
+      <div class="card-img">
+        <img src="${e.imageSrc||''}" loading="lazy">
+        <div class="badge">#${e.taskNumber||'?'}</div>
+        <div class="badge2">${e.noObject ? 'No Obj' : (e.selectedSquares||[]).length+' sq'}</div>
+      </div>
+      <div class="card-info">
+        <div class="card-obj">#${e.taskNumber||'?'} ${e.noObject?'🚫':'✅'} ${e.objectName||'?'}</div>
+        <div class="card-meta">${fmtDate(e.trainedAt)}</div>
+      </div>
+    </div>
+  `).join('');
+}
+
+// ── Clients ──────────────────────────────────────────────────────
+async function loadClients() {
+  try {
+    const d = await api('GET', '/admin/clients');
+    clientsData = d.clients || {};
+    renderClients();
+  } catch(e) {}
+}
+
+function renderClients() {
+  const clients = Object.values(clientsData);
+  const el = document.getElementById('client-list');
+  if (!clients.length) { el.innerHTML = '<div class="no-items"><p>Koi client nahi — pehle add karo</p></div>'; return; }
+  el.innerHTML = clients.map(c => `
+    <div class="client-item">
+      <div>
+        <div class="client-name">${c.name}</div>
+        <div class="client-key">🔑 ${c.apiKey}</div>
+      </div>
+      <div class="client-seen">Last: ${c.lastSeen ? fmtDate(c.lastSeen) : 'Never'}</div>
+      <button class="btn btn-ghost" style="padding:4px 10px;font-size:11px" onclick="copyKey('${c.apiKey}')">📋 Copy</button>
+      <button class="btn btn-danger" style="padding:4px 10px;font-size:11px" onclick="deleteClient('${c.apiKey}')">🗑</button>
+    </div>
+  `).join('');
+}
+
+async function createClient() {
+  const name = document.getElementById('new-client-name').value.trim();
+  if (!name) { toast('Name dalo', 'err'); return; }
+  const d = await api('POST', '/admin/clients', { name });
+  if (d.ok) {
+    toast(`✅ Client created! Key: ${d.apiKey}`, 'ok');
+    document.getElementById('new-client-name').value = '';
+    await loadClients();
+    loadStats();
+  }
+}
+
+async function deleteClient(apiKey) {
+  if (!confirm('Delete this client?')) return;
+  await api('DELETE', '/admin/clients/' + apiKey);
+  await loadClients();
+  loadStats();
+  toast('Client deleted', 'info');
+}
+
+function copyKey(key) {
+  navigator.clipboard.writeText(key);
+  toast('API key copied!', 'ok');
+}
+
+// ── Training Modal ────────────────────────────────────────────────
+function openModal(entry) {
+  modalEntry = entry;
+  selectedCells.clear();
+
+  // Pre-fill if already trained
+  if (entry.selectedSquares) {
+    entry.selectedSquares.forEach(s => selectedCells.add(s.index));
+  }
+
+  document.getElementById('modal-title').textContent =
+    `#${entry.taskNumber||'?'} Train: "${entry.objectName||'?'}"`;
+  document.getElementById('modal-obj').textContent = entry.objectName || '?';
+  document.getElementById('modal-img').src = entry.imageSrc || '';
+
+  const rows = entry.gridInfo ? entry.gridInfo.rows : (entry.gridRows || 3);
+  const cols = entry.gridInfo ? entry.gridInfo.cols : (entry.gridCols || 3);
+  document.getElementById('g-rows').value = rows;
+  document.getElementById('g-cols').value = cols;
+
+  buildGrid();
+  document.getElementById('modal').classList.add('open');
+}
+
+function closeModal() {
+  document.getElementById('modal').classList.remove('open');
+  modalEntry = null;
+  selectedCells.clear();
+}
+
+function buildGrid() {
+  const rows = parseInt(document.getElementById('g-rows').value) || 3;
+  const cols = parseInt(document.getElementById('g-cols').value) || 3;
+  const ov = document.getElementById('grid-ov');
+  ov.style.gridTemplateRows = `repeat(${rows},1fr)`;
+  ov.style.gridTemplateColumns = `repeat(${cols},1fr)`;
+  ov.innerHTML = '';
+  for (let i = 0; i < rows*cols; i++) {
+    const c = document.createElement('div');
+    c.className = 'cell' + (selectedCells.has(i) ? ' sel' : '');
+    c.dataset.i = i;
+    c.addEventListener('click', () => toggleCell(i, c));
+    ov.appendChild(c);
+  }
+  updateSelCount();
+}
+
+function toggleCell(i, el) {
+  if (selectedCells.has(i)) { selectedCells.delete(i); el.classList.remove('sel'); }
+  else { selectedCells.add(i); el.classList.add('sel'); }
+  updateSelCount();
+}
+
+function clearSel() {
+  selectedCells.clear();
+  document.querySelectorAll('.cell').forEach(c => c.classList.remove('sel'));
+  updateSelCount();
+}
+
+function updateSelCount() {
+  document.getElementById('sel-count').textContent = selectedCells.size + ' selected';
+}
+
+async function saveTrain(noObject) {
+  if (!modalEntry) return;
+  if (!noObject && selectedCells.size === 0) {
+    toast('Squares select karo ya "Object Not Found" dabao', 'err'); return;
+  }
+
+  const rows = parseInt(document.getElementById('g-rows').value) || 3;
+  const cols = parseInt(document.getElementById('g-cols').value) || 3;
+
+  // Assign task number
+  const taskNumber = modalEntry.taskNumber || (taskCounter + 1);
+
+  // Build pHash array for squares (perceptual hash)
+  const squarePHashes = await buildPHashes(modalEntry.imageSrc, rows, cols, noObject);
+
+  const payload = {
+    imageKey: modalEntry.imageKey,
+    imageSrc: modalEntry.imageSrc,
+    objectName: modalEntry.objectName,
+    taskText: modalEntry.taskText || '',
+    selectedSquares: noObject ? [] : [...selectedCells].map(i => ({ index: i })),
+    noObject,
+    gridRows: rows,
+    gridCols: cols,
+    squarePHashes,
+    taskNumber
+  };
+
+  const d = await api('POST', '/admin/train', payload);
+  if (d.ok) {
+    toast(`✅ #${taskNumber} "${modalEntry.objectName}" trained!`, 'ok');
+    closeModal();
+    loadStats();
+    loadUnsolved();
+    loadTrained();
+  } else {
+    toast('Error: ' + (d.error || 'Unknown'), 'err');
+  }
+}
+
+// Perceptual hash for each cell (same algo as extension)
+async function buildPHashes(imageSrc, rows, cols, noObject) {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onload = () => {
+      const cw = Math.floor(img.width / cols);
+      const ch = Math.floor(img.height / rows);
+      const results = [];
+      let idx = 0;
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const canvas = document.createElement('canvas');
+          canvas.width = 8; canvas.height = 8;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, c*cw, r*ch, cw, ch, 0, 0, 8, 8);
+          let hash = '';
+          try {
+            const data = ctx.getImageData(0, 0, 8, 8).data;
+            const gray = [];
+            for (let i = 0; i < data.length; i += 4)
+              gray.push(data[i]*0.299 + data[i+1]*0.587 + data[i+2]*0.114);
+            const avg = gray.reduce((a,b)=>a+b,0) / gray.length;
+            hash = gray.map(g => g > avg ? '1' : '0').join('');
+          } catch(e) { hash = ''; }
+          results.push({
+            index: idx,
+            hash,
+            isObject: !noObject && selectedCells.has(idx)
+          });
+          idx++;
+        }
+      }
+      resolve(results);
+    };
+    img.onerror = () => resolve([]);
+    img.src = imageSrc;
+  });
+}
+
+// ── Helpers ──────────────────────────────────────────────────────
+function fmtDate(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+}
+
+function toast(msg, type='info') {
+  const old = document.querySelector('.toast'); if (old) old.remove();
+  const el = document.createElement('div');
+  el.className = `toast toast-${type}`;
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 3500);
+}
+</script>
+</body>
+</html>
