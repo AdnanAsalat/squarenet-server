@@ -248,10 +248,11 @@ app.get('/admin/clients', (req, res) => {
 
 app.post('/admin/clients', (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
-  const { name, plan } = req.body;
+  const { name, plan, apiKey: providedKey } = req.body;
   if (!name) return res.status(400).json({ error: 'Name required' });
   const clients = getClients();
-  const apiKey = 'sn_' + uuidv4().replace(/-/g,'').substring(0,24);
+  // Use provided key from portal, or generate new one
+  const apiKey = providedKey || ('sn_' + uuidv4().replace(/-/g,'').substring(0,24));
   clients[apiKey] = { name, apiKey, plan:plan||1000, active:true,
     createdAt:new Date().toISOString(), lastSeen:null };
   saveClients(clients);
