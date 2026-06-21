@@ -231,6 +231,7 @@ app.post('/admin/train', (req, res) => {
   const trained = getTrained();
   trained[imageKey] = { imageKey, imageSrc, objectName, taskText,
     selectedSquares:selectedSquares||[], noObject:noObject||false,
+    gridRows:gridRows||3, gridCols:gridCols||3,
     taskNumber:taskNumber||1, trainedAt:new Date().toISOString() };
   saveTrained(trained);
   res.json({ ok: true });
