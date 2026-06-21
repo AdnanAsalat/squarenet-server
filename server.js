@@ -156,7 +156,8 @@ app.post('/api/unsolved', (req, res) => {
     submittedAt: new Date().toISOString(), status: 'pending'
   };
   saveUnsolved(unsolved);
-  incrementUsage(apiKey);
+  // NOTE: Do NOT increment usage here — submitting an unsolved task for training
+  // is not a "solve". Only count actual solves (in /api/solved).
   res.json({ ok: true, status: 'saved' });
 });
 
@@ -190,16 +191,21 @@ app.get('/admin/stats', (req, res) => {
 app.get('/admin/unsolved', (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
   const unsolved = getUnsolved();
-  const list = Object.values(unsolved).filter(e=>e.status==='pending')
+  const all = Object.values(unsolved).filter(e=>e.status==='pending')
     .sort((a,b)=>new Date(b.submittedAt)-new Date(a.submittedAt));
-  res.json({ list, count: list.length });
+  // Pagination: return `limit` items starting at `offset` (for Load More)
+  const offset = parseInt(req.query.offset) || 0;
+  const limit = parseInt(req.query.limit) || 60;
+  const list = all.slice(offset, offset + limit);
+  res.json({ list, count: list.length, total: all.length, offset, limit });
 });
 
 app.get('/admin/trained', (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
   const trained = getTrained();
+  // Return all trained — dashboard loads this once and caches it.
   const list = Object.values(trained).sort((a,b)=>new Date(b.trainedAt)-new Date(a.trainedAt));
-  res.json({ list, count: list.length });
+  res.json({ list, count: list.length, total: list.length });
 });
 
 app.post('/admin/train', (req, res) => {
