@@ -211,13 +211,32 @@ app.get('/admin/trained', (req, res) => {
 app.post('/admin/train', (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
   const { imageKey, imageSrc, objectName, taskText, selectedSquares,
-          noObject, gridRows, gridCols, squarePHashes, taskNumber } = req.body;
+          noObject, gridRows, gridCols, squarePHashes } = req.body;
   if (!imageKey) return res.status(400).json({ error: 'Missing imageKey' });
+
   const kb = getKB();
+  const trained = getTrained();
+
+  // Determine the task number:
+  // - If this image was trained before, KEEP its existing number (retrain).
+  // - Otherwise assign a NEW number = (highest number ever used) + 1.
+  //   This stays unique even after deletes (never reuses a number).
+  let taskNumber;
+  if (kb[imageKey] && kb[imageKey].taskNumber) {
+    taskNumber = kb[imageKey].taskNumber;
+  } else if (trained[imageKey] && trained[imageKey].taskNumber) {
+    taskNumber = trained[imageKey].taskNumber;
+  } else {
+    let maxNum = 0;
+    for (const v of Object.values(kb)) if (v.taskNumber > maxNum) maxNum = v.taskNumber;
+    for (const v of Object.values(trained)) if (v.taskNumber > maxNum) maxNum = v.taskNumber;
+    taskNumber = maxNum + 1;
+  }
+
   kb[imageKey] = { objectName:objectName||'', imageSrc:imageSrc||'',
     noObject:noObject||false, selectedSquares:selectedSquares||[],
     gridRows:gridRows||3, gridCols:gridCols||3,
-    taskNumber:taskNumber||1, trainedAt:new Date().toISOString() };
+    taskNumber, trainedAt:new Date().toISOString() };
   saveKB(kb);
   if (squarePHashes && Array.isArray(squarePHashes)) {
     const sqKB = getSquareKB();
@@ -228,13 +247,12 @@ app.post('/admin/train', (req, res) => {
   }
   const unsolved = getUnsolved();
   if (unsolved[imageKey]) { unsolved[imageKey].status='trained'; saveUnsolved(unsolved); }
-  const trained = getTrained();
   trained[imageKey] = { imageKey, imageSrc, objectName, taskText,
     selectedSquares:selectedSquares||[], noObject:noObject||false,
     gridRows:gridRows||3, gridCols:gridCols||3,
-    taskNumber:taskNumber||1, trainedAt:new Date().toISOString() };
+    taskNumber, trainedAt:new Date().toISOString() };
   saveTrained(trained);
-  res.json({ ok: true });
+  res.json({ ok: true, taskNumber });
 });
 
 app.delete('/admin/trained/:key', (req, res) => {
