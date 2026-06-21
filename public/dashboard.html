@@ -303,13 +303,21 @@ async function loadStats(){
   }catch(e){}
 }
 
+// Track keys we just trained so auto-refresh doesn't bring them back (flicker fix)
+window._recentlyTrained = window._recentlyTrained || new Set();
+
 // ── UNSOLVED ────────────────────────────────────────────────────
 async function loadUnsolved(){
   // Fresh load — reset to first page
   try{
     const d=await api('GET','/admin/unsolved?offset=0&limit=60');
-    unsolvedData=d.list||[];
-    window._unsolvedTotal=d.total||0;
+    let list=d.list||[];
+    // Remove any task we just trained (server may still show it as pending briefly)
+    if(window._recentlyTrained.size){
+      list=list.filter(e=>!window._recentlyTrained.has(e.imageKey));
+    }
+    unsolvedData=list;
+    window._unsolvedTotal=Math.max(0,(d.total||0)-window._recentlyTrained.size);
     window._unsolvedOffset=unsolvedData.length;
     renderUnsolved();
     updateLoadMore();
@@ -518,6 +526,7 @@ async function saveTrain(noObject){
 
   // 1) Close modal & remove the task from the unsolved list IMMEDIATELY (feels instant)
   closeModal();
+  window._recentlyTrained.add(entry.imageKey);   // prevent auto-refresh flicker
   unsolvedData = unsolvedData.filter(e=>e.imageKey!==entry.imageKey);
   renderUnsolved(); updateLoadMore();
   toast(`✅ #${taskNumber} "${objName}" trained!`,'ok');
@@ -545,10 +554,16 @@ async function saveTrain(noObject){
     if(d.ok){
       loadStats();
     } else {
+      window._recentlyTrained.delete(entry.imageKey);  // allow it back
+      trainedData = trainedData.filter(e=>e.imageKey!==entry.imageKey);
       toast('Save failed: '+(d.error||'?'),'err');
       loadUnsolved();                // restore the task if save failed
     }
-  }catch(e){ toast('Save error: '+e.message,'err'); loadUnsolved(); }
+  }catch(e){
+    window._recentlyTrained.delete(entry.imageKey);
+    trainedData = trainedData.filter(e=>e.imageKey!==entry.imageKey);
+    toast('Save error: '+e.message,'err'); loadUnsolved();
+  }
 }
 
 async function deleteTrained(){
