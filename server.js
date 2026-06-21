@@ -234,8 +234,22 @@ app.delete('/admin/trained/:key', (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
   const key = decodeURIComponent(req.params.key);
   const kb = getKB(); const trained = getTrained();
+  const objName = (kb[key]||{}).objectName;
   delete kb[key]; delete trained[key];
   saveKB(kb); saveTrained(trained);
+  // Also remove orphaned pHash entries for this object from squareKB
+  if (objName) {
+    const sqKB = getSquareKB();
+    let changed = false;
+    for (const h of Object.keys(sqKB)) {
+      const v = sqKB[h];
+      if (v && typeof v === 'object' && v.name === objName) { delete sqKB[h]; changed = true; }
+    }
+    if (changed) saveSquareKB(sqKB);
+  }
+  // Reset unsolved status so it can be re-trained if seen again
+  const unsolved = getUnsolved();
+  if (unsolved[key]) { unsolved[key].status = 'unsolved'; saveUnsolved(unsolved); }
   res.json({ ok: true });
 });
 
