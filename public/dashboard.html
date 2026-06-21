@@ -510,8 +510,11 @@ async function saveTrain(noObject){
   const rows=parseInt(document.getElementById('g-rows').value)||3;
   const cols=parseInt(document.getElementById('g-cols').value)||3;
   const taskNumber=modalEntry.taskNumber||(taskCounter+1);
-  const entry=modalEntry;          // capture before closing
+  const entry=modalEntry;                       // capture before closing
   const objName=entry.objectName;
+  // IMPORTANT: copy selected cells NOW — closeModal() clears selectedCells
+  const cellsCopy=[...selectedCells];
+  const selectedSquares=noObject?[]:cellsCopy.map(i=>({index:i}));
 
   // 1) Close modal & remove the task from the unsolved list IMMEDIATELY (feels instant)
   closeModal();
@@ -519,18 +522,28 @@ async function saveTrain(noObject){
   renderUnsolved(); updateLoadMore();
   toast(`✅ #${taskNumber} "${objName}" trained!`,'ok');
 
+  // Add to local trained list right away so its training shows immediately
+  const trainedEntry={
+    imageKey:entry.imageKey, imageSrc:entry.imageSrc, objectName:objName,
+    taskText:entry.taskText||'', selectedSquares, noObject:noObject||false,
+    gridRows:rows, gridCols:cols, taskNumber, trainedAt:new Date().toISOString()
+  };
+  // Remove any old version of this task, add the new one at the top
+  trainedData = trainedData.filter(e=>e.imageKey!==entry.imageKey);
+  trainedData.unshift(trainedEntry);
+  if(window._trainedLoaded) renderTrained();
+
   // 2) Do the heavy work (pHash + save) in the background
   try{
-    const squarePHashes=await buildPHashes(entry.imageSrc,rows,cols,noObject);
+    const squarePHashes=await buildPHashes(entry.imageSrc,rows,cols,noObject,cellsCopy);
     const d=await api('POST','/admin/train',{
       imageKey:entry.imageKey, imageSrc:entry.imageSrc,
       objectName:objName, taskText:entry.taskText||'',
-      selectedSquares:noObject?[]:[...selectedCells].map(i=>({index:i})),
+      selectedSquares,
       noObject, gridRows:rows, gridCols:cols, squarePHashes, taskNumber
     });
     if(d.ok){
       loadStats();
-      window._trainedLoaded=false;   // trained list will refresh next time it's opened
     } else {
       toast('Save failed: '+(d.error||'?'),'err');
       loadUnsolved();                // restore the task if save failed
@@ -554,7 +567,8 @@ async function deleteTrained(){
   }catch(e){ toast('Delete error: '+e.message,'err'); loadTrained(); }
 }
 
-async function buildPHashes(src,rows,cols,noObject){
+async function buildPHashes(src,rows,cols,noObject,cellsCopy){
+  const selSet = new Set(cellsCopy || [...selectedCells]);
   return new Promise(resolve=>{
     const img=new Image();
     img.onload=()=>{
@@ -570,7 +584,7 @@ async function buildPHashes(src,rows,cols,noObject){
           const avg=gray.reduce((a,b)=>a+b,0)/gray.length;
           hash=gray.map(g=>g>avg?'1':'0').join('');
         }catch(e){}
-        results.push({index:idx,hash,isObject:!noObject&&selectedCells.has(idx)}); idx++;
+        results.push({index:idx,hash,isObject:!noObject&&selSet.has(idx)}); idx++;
       }
       resolve(results);
     };
