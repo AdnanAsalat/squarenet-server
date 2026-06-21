@@ -208,6 +208,38 @@ app.get('/admin/trained', (req, res) => {
   res.json({ list, count: list.length, total: list.length });
 });
 
+// Fix duplicate/missing task numbers — renumber all trained tasks uniquely
+// by trained date (oldest = #1). Safe to run anytime.
+app.post('/admin/renumber', (req, res) => {
+  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
+  const kb = getKB();
+  const trained = getTrained();
+  const sqKB = getSquareKB();
+
+  const entries = Object.values(trained)
+    .sort((a,b) => new Date(a.trainedAt||0) - new Date(b.trainedAt||0));
+
+  let n = 0;
+  const remap = {};
+  for (const e of entries) {
+    n++;
+    e.taskNumber = n;
+    trained[e.imageKey] = e;
+    if (kb[e.imageKey]) kb[e.imageKey].taskNumber = n;
+    if (e.objectName) remap[e.objectName] = n;
+  }
+
+  for (const h of Object.keys(sqKB)) {
+    const v = sqKB[h];
+    if (v && typeof v === 'object' && v.name && remap[v.name] !== undefined) {
+      v.num = remap[v.name];
+    }
+  }
+
+  saveKB(kb); saveTrained(trained); saveSquareKB(sqKB);
+  res.json({ ok: true, renumbered: n });
+});
+
 app.post('/admin/train', (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
   const { imageKey, imageSrc, objectName, taskText, selectedSquares,
