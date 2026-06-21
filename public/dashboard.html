@@ -177,6 +177,7 @@ input:focus{border-color:var(--accent)}
       <div class="toolbar">
         <input class="search" id="search-trained" placeholder="🔍 Search..." oninput="renderTrained()">
         <div class="spacer"></div>
+        <button class="btn btn-amber btn-sm" onclick="renumberTasks()">🔢 Fix Numbers</button>
         <button class="btn btn-ghost btn-sm" onclick="loadTrained()">🔄 Refresh</button>
       </div>
       <div class="grid-scroll">
@@ -362,6 +363,22 @@ function renderUnsolved(){
 // ── TRAINED ─────────────────────────────────────────────────────
 async function loadTrained(){
   try{ const d=await api('GET','/admin/trained'); trainedData=d.list||[]; window._trainedTotal=d.total||d.count||0; window._trainedLoaded=true; renderTrained(); }catch(e){}
+}
+
+async function renumberTasks(){
+  if(!confirm('Fix all task numbers?\n\nThis renumbers every trained task uniquely (oldest = #1). Use this if you see duplicate numbers after deleting tasks.')) return;
+  toast('Fixing numbers...','inf');
+  try{
+    const d=await api('POST','/admin/renumber');
+    if(d.ok){
+      toast(`✅ Done! ${d.renumbered} tasks renumbered.`,'ok');
+      window._trainedLoaded=false;
+      loadTrained();
+      loadStats();
+    } else {
+      toast('Error: '+(d.error||'?'),'err');
+    }
+  }catch(e){ toast('Error: '+e.message,'err'); }
 }
 
 function renderTrained(){
