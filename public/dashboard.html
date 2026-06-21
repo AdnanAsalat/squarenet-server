@@ -494,23 +494,48 @@ async function saveTrain(noObject){
   const rows=parseInt(document.getElementById('g-rows').value)||3;
   const cols=parseInt(document.getElementById('g-cols').value)||3;
   const taskNumber=modalEntry.taskNumber||(taskCounter+1);
-  const squarePHashes=await buildPHashes(modalEntry.imageSrc,rows,cols,noObject);
-  const d=await api('POST','/admin/train',{
-    imageKey:modalEntry.imageKey, imageSrc:modalEntry.imageSrc,
-    objectName:modalEntry.objectName, taskText:modalEntry.taskText||'',
-    selectedSquares:noObject?[]:[...selectedCells].map(i=>({index:i})),
-    noObject, gridRows:rows, gridCols:cols, squarePHashes, taskNumber
-  });
-  if(d.ok){ toast(`✅ #${taskNumber} "${modalEntry.objectName}" trained!`,'ok'); closeModal(); loadStats(); loadUnsolved(); loadTrained(); }
-  else toast('Error: '+(d.error||'?'),'err');
+  const entry=modalEntry;          // capture before closing
+  const objName=entry.objectName;
+
+  // 1) Close modal & remove the task from the unsolved list IMMEDIATELY (feels instant)
+  closeModal();
+  unsolvedData = unsolvedData.filter(e=>e.imageKey!==entry.imageKey);
+  renderUnsolved(); updateLoadMore();
+  toast(`✅ #${taskNumber} "${objName}" trained!`,'ok');
+
+  // 2) Do the heavy work (pHash + save) in the background
+  try{
+    const squarePHashes=await buildPHashes(entry.imageSrc,rows,cols,noObject);
+    const d=await api('POST','/admin/train',{
+      imageKey:entry.imageKey, imageSrc:entry.imageSrc,
+      objectName:objName, taskText:entry.taskText||'',
+      selectedSquares:noObject?[]:[...selectedCells].map(i=>({index:i})),
+      noObject, gridRows:rows, gridCols:cols, squarePHashes, taskNumber
+    });
+    if(d.ok){
+      loadStats();
+      window._trainedLoaded=false;   // trained list will refresh next time it's opened
+    } else {
+      toast('Save failed: '+(d.error||'?'),'err');
+      loadUnsolved();                // restore the task if save failed
+    }
+  }catch(e){ toast('Save error: '+e.message,'err'); loadUnsolved(); }
 }
 
 async function deleteTrained(){
   if(!modalEntry||!modalEntry.imageKey){toast('Cannot delete — no key','err');return;}
   if(!confirm(`Delete trained task #${modalEntry.taskNumber||'?'} "${modalEntry.objectName||'?'}"?\n\nThis cannot be undone.`)) return;
-  const d=await api('DELETE','/admin/trained/'+encodeURIComponent(modalEntry.imageKey));
-  if(d.ok){ toast('🗑 Deleted','ok'); closeModal(); loadStats(); loadTrained(); loadUnsolved(); }
-  else toast('Error: '+(d.error||'?'),'err');
+  const entry=modalEntry;
+  // Remove from trained list UI immediately
+  closeModal();
+  trainedData = trainedData.filter(e=>e.imageKey!==entry.imageKey);
+  renderTrained();
+  toast('🗑 Deleted','ok');
+  try{
+    const d=await api('DELETE','/admin/trained/'+encodeURIComponent(entry.imageKey));
+    if(d.ok){ loadStats(); }
+    else { toast('Delete failed: '+(d.error||'?'),'err'); loadTrained(); }
+  }catch(e){ toast('Delete error: '+e.message,'err'); loadTrained(); }
 }
 
 async function buildPHashes(src,rows,cols,noObject){
