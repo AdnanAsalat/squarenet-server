@@ -158,10 +158,14 @@ input:focus{border-color:var(--accent)}
       <div class="toolbar">
         <input class="search" id="search-unsolved" placeholder="🔍 Search..." oninput="renderUnsolved()">
         <div class="spacer"></div>
+        <span id="unsolved-count" style="font-size:12px;color:var(--muted);margin-right:10px"></span>
         <button class="btn btn-ghost btn-sm" onclick="loadUnsolved()">🔄 Refresh</button>
       </div>
       <div class="grid-scroll">
         <div class="grid-list" id="unsolved-list"><div class="no-items">Loading...</div></div>
+        <div style="text-align:center;padding:14px">
+          <button class="btn btn-ghost" id="load-more-btn" onclick="loadMoreUnsolved()" style="display:none">⬇ Load More</button>
+        </div>
       </div>
     </div>
 
@@ -271,11 +275,18 @@ function initApp(){
     document.querySelectorAll('.pane').forEach(x=>x.classList.remove('active'));
     t.classList.add('active');
     document.getElementById('pane-'+t.dataset.tab).classList.add('active');
-    if(t.dataset.tab==='trained') loadTrained();
+    // Trained loads ONCE — only first time the tab is opened. After that it's cached.
+    if(t.dataset.tab==='trained' && !window._trainedLoaded) loadTrained();
     if(t.dataset.tab==='clients') loadClients();
   }));
   loadStats(); loadUnsolved();
-  setInterval(()=>{ loadStats(); loadUnsolved(); }, 2000);
+  // Auto-refresh ONLY the unsolved tab (new tasks arrive there).
+  // Trained tab loads once and is NOT auto-refreshed (it only changes when admin trains/deletes).
+  setInterval(()=>{
+    loadStats();
+    const activeTab = document.querySelector('.tab.active')?.dataset.tab;
+    if(activeTab==='unsolved') loadUnsolved();
+  }, 8000);
 }
 
 async function loadStats(){
@@ -291,7 +302,35 @@ async function loadStats(){
 
 // ── UNSOLVED ────────────────────────────────────────────────────
 async function loadUnsolved(){
-  try{ const d=await api('GET','/admin/unsolved'); unsolvedData=d.list||[]; renderUnsolved(); }catch(e){}
+  // Fresh load — reset to first page
+  try{
+    const d=await api('GET','/admin/unsolved?offset=0&limit=60');
+    unsolvedData=d.list||[];
+    window._unsolvedTotal=d.total||0;
+    window._unsolvedOffset=unsolvedData.length;
+    renderUnsolved();
+    updateLoadMore();
+  }catch(e){}
+}
+
+async function loadMoreUnsolved(){
+  try{
+    const offset=window._unsolvedOffset||0;
+    const d=await api('GET','/admin/unsolved?offset='+offset+'&limit=60');
+    unsolvedData=unsolvedData.concat(d.list||[]);
+    window._unsolvedOffset=unsolvedData.length;
+    renderUnsolved();
+    updateLoadMore();
+  }catch(e){}
+}
+
+function updateLoadMore(){
+  const total=window._unsolvedTotal||0;
+  const shown=unsolvedData.length;
+  const btn=document.getElementById('load-more-btn');
+  const cnt=document.getElementById('unsolved-count');
+  if(cnt) cnt.textContent = `${shown} / ${total}`;
+  if(btn) btn.style.display = (shown < total) ? 'inline-flex' : 'none';
 }
 
 function renderUnsolved(){
@@ -311,7 +350,7 @@ function renderUnsolved(){
 
 // ── TRAINED ─────────────────────────────────────────────────────
 async function loadTrained(){
-  try{ const d=await api('GET','/admin/trained'); trainedData=d.list||[]; renderTrained(); }catch(e){}
+  try{ const d=await api('GET','/admin/trained'); trainedData=d.list||[]; window._trainedTotal=d.total||d.count||0; window._trainedLoaded=true; renderTrained(); }catch(e){}
 }
 
 function renderTrained(){
