@@ -549,9 +549,14 @@ async function saveTrain(noObject){
       imageKey:entry.imageKey, imageSrc:entry.imageSrc,
       objectName:objName, taskText:entry.taskText||'',
       selectedSquares,
-      noObject, gridRows:rows, gridCols:cols, squarePHashes, taskNumber
+      noObject, gridRows:rows, gridCols:cols, squarePHashes
     });
     if(d.ok){
+      // Server decides the real, unique task number — sync our local copy to it
+      if(d.taskNumber && d.taskNumber!==taskNumber){
+        const t=trainedData.find(e=>e.imageKey===entry.imageKey);
+        if(t){ t.taskNumber=d.taskNumber; if(window._trainedLoaded) renderTrained(); }
+      }
       loadStats();
     } else {
       window._recentlyTrained.delete(entry.imageKey);  // allow it back
