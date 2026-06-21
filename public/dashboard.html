@@ -50,6 +50,7 @@ input:focus{border-color:var(--accent)}
 .btn-danger{background:var(--red);color:#fff}
 .btn-green{background:var(--green);color:#fff}
 .btn-amber{background:var(--amber);color:#000}
+.btn-red{background:#ef4444;color:#fff}
 .btn-sm{padding:4px 10px;font-size:11px}
 
 /* GRIDS */
@@ -212,6 +213,7 @@ input:focus{border-color:var(--accent)}
     </div>
     <div class="modal-foot">
       <button class="btn btn-amber" onclick="saveTrain(true)">🚫 Not Found</button>
+      <button class="btn btn-red" id="modal-delete-btn" onclick="deleteTrained()" style="display:none">🗑 Delete</button>
       <div class="spacer"></div>
       <button class="btn btn-ghost" onclick="closeModal()">Skip</button>
       <button class="btn btn-green" onclick="saveTrain(false)">💾 Save & Train</button>
@@ -419,6 +421,9 @@ function openModal(entry){
   const cols=entry.gridInfo?entry.gridInfo.cols:(entry.gridCols||3);
   document.getElementById('g-rows').value=rows;
   document.getElementById('g-cols').value=cols;
+  // Show delete button only if this is an already-trained entry (has trainedAt)
+  const delBtn=document.getElementById('modal-delete-btn');
+  if(delBtn) delBtn.style.display = entry.trainedAt ? 'inline-flex' : 'none';
   buildGrid();
   document.getElementById('modal').classList.add('open');
 }
@@ -457,7 +462,15 @@ async function saveTrain(noObject){
     selectedSquares:noObject?[]:[...selectedCells].map(i=>({index:i})),
     noObject, gridRows:rows, gridCols:cols, squarePHashes, taskNumber
   });
-  if(d.ok){ toast(`✅ #${taskNumber} "${modalEntry.objectName}" trained!`,'ok'); closeModal(); loadStats(); loadUnsolved(); }
+  if(d.ok){ toast(`✅ #${taskNumber} "${modalEntry.objectName}" trained!`,'ok'); closeModal(); loadStats(); loadUnsolved(); loadTrained(); }
+  else toast('Error: '+(d.error||'?'),'err');
+}
+
+async function deleteTrained(){
+  if(!modalEntry||!modalEntry.imageKey){toast('Cannot delete — no key','err');return;}
+  if(!confirm(`Delete trained task #${modalEntry.taskNumber||'?'} "${modalEntry.objectName||'?'}"?\n\nThis cannot be undone.`)) return;
+  const d=await api('DELETE','/admin/trained/'+encodeURIComponent(modalEntry.imageKey));
+  if(d.ok){ toast('🗑 Deleted','ok'); closeModal(); loadStats(); loadTrained(); loadUnsolved(); }
   else toast('Error: '+(d.error||'?'),'err');
 }
 
