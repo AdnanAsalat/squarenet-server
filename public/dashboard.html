@@ -153,6 +153,7 @@ input:focus{border-color:var(--accent)}
     <div class="tab active" data-tab="unsolved">📥 Unsolved</div>
     <div class="tab" data-tab="trained">✅ Trained</div>
     <div class="tab" data-tab="clients">👥 Clients</div>
+    <div class="tab" data-tab="complaints">⚠️ Complaints <span id="comp-badge" style="display:none;background:#dc2626;color:#fff;border-radius:10px;padding:0 6px;font-size:10px;margin-left:4px"></span></div>
   </div>
 
   <div class="panes">
@@ -195,6 +196,19 @@ input:focus{border-color:var(--accent)}
         <button class="btn btn-ghost btn-sm" onclick="loadClients()">🔄 Refresh</button>
       </div>
       <div class="client-list" id="client-list"><div class="no-items">Loading...</div></div>
+    </div>
+
+    <!-- COMPLAINTS -->
+    <div class="pane" id="pane-complaints">
+      <div class="toolbar">
+        <span style="color:var(--muted);font-size:13px">Client-reported wrong solves</span>
+        <div class="spacer"></div>
+        <button class="btn btn-red btn-sm" onclick="clearComplaints()">🗑 Clear All</button>
+        <button class="btn btn-ghost btn-sm" onclick="loadComplaints()">🔄 Refresh</button>
+      </div>
+      <div class="grid-scroll">
+        <div id="complaints-list"><div class="no-items">Loading...</div></div>
+      </div>
     </div>
   </div>
 </div>
@@ -282,6 +296,7 @@ function initApp(){
     // Trained loads ONCE — only first time the tab is opened. After that it's cached.
     if(t.dataset.tab==='trained' && !window._trainedLoaded) loadTrained();
     if(t.dataset.tab==='clients') loadClients();
+    if(t.dataset.tab==='complaints') loadComplaints();
   }));
   loadStats(); loadUnsolved();
   // Auto-refresh ONLY the unsolved tab (new tasks arrive there).
@@ -301,6 +316,9 @@ async function loadStats(){
     document.getElementById('hs-clients').textContent=d.clients||0;
     document.getElementById('hs-today').textContent=d.tasksToday||0;
     taskCounter=d.trained||0;
+    // Complaints badge on the tab
+    const cb=document.getElementById('comp-badge');
+    if(cb){ const n=d.complaints||0; if(n){cb.style.display='inline-block';cb.textContent=n;}else{cb.style.display='none';} }
   }catch(e){}
 }
 
@@ -379,6 +397,95 @@ async function renumberTasks(){
       toast('Error: '+(d.error||'?'),'err');
     }
   }catch(e){ toast('Error: '+e.message,'err'); }
+}
+
+// ── COMPLAINTS ──────────────────────────────────────────────
+async function loadComplaints(){
+  try{
+    const d=await api('GET','/admin/complaints');
+    window._complaints=d.list||[];
+    renderComplaints();
+  }catch(e){}
+}
+
+function miniGridHTML(rows,cols,selSet,color){
+  let cells='';
+  for(let i=0;i<rows*cols;i++){
+    const on=selSet.has(i);
+    cells+=`<div style="border:1px solid #333;${on?`background:${color};border:2px solid ${color}`:''}"></div>`;
+  }
+  return `<div style="display:grid;grid-template-columns:repeat(${cols},14px);grid-template-rows:repeat(${rows},14px);gap:2px">${cells}</div>`;
+}
+
+function renderComplaints(){
+  const el=document.getElementById('complaints-list');
+  const items=window._complaints||[];
+  // Badge
+  const badge=document.getElementById('comp-badge');
+  if(badge){ if(items.length){badge.style.display='inline-block';badge.textContent=items.length;}else{badge.style.display='none';} }
+
+  if(!items.length){ el.innerHTML='<div class="no-items">No complaints 🎉</div>'; return; }
+
+  el.innerHTML=items.map(c=>{
+    const rows=c.gridRows||3, cols=c.gridCols||3;
+    const solvedSet=new Set((c.solvedSquares||[]).map(s=>typeof s==='object'?s.index:s));
+    const trainedSet=new Set((c.trainedSquares||[]).map(s=>typeof s==='object'?s.index:s));
+    const solvedGrid = c.noObjectSolved ? '<div style="color:#f59e0b;font-size:12px">🚫 Solved as "Not Found"</div>' : miniGridHTML(rows,cols,solvedSet,'#3b82f6');
+    const trainedGrid = c.trainedNoObject ? '<div style="color:#f59e0b;font-size:12px">🚫 Trained as "Not Found"</div>' : (c.isTrained ? miniGridHTML(rows,cols,trainedSet,'#22c55e') : '<div style="color:#888;font-size:12px">Not in training DB</div>');
+
+    return `
+    <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:12px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div style="font-weight:700;color:#fff">#${c.taskNumber||'?'} — "${c.objectName||'?'}"</div>
+        <button class="btn btn-ghost btn-sm" onclick="deleteComplaint('${c.id}')">🗑 Remove</button>
+      </div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
+        👤 ${c.clientName||'?'} ${c.clientEmail?'('+c.clientEmail+')':''} • 📅 ${fmtDate(c.createdAt)}
+      </div>
+      <div style="display:flex;gap:18px;flex-wrap:wrap;align-items:flex-start">
+        <div style="text-align:center">
+          <img src="${c.imageSrc||''}" style="width:140px;height:140px;object-fit:cover;border-radius:8px" loading="lazy">
+          <div style="font-size:10px;color:var(--muted);margin-top:4px">Task image</div>
+        </div>
+        <div style="text-align:center">
+          ${solvedGrid}
+          <div style="font-size:10px;color:#3b82f6;margin-top:4px">How it solved (client saw)</div>
+        </div>
+        <div style="text-align:center">
+          ${trainedGrid}
+          <div style="font-size:10px;color:#22c55e;margin-top:4px">Your training</div>
+        </div>
+      </div>
+      ${c.isTrained ? `<button class="btn btn-amber btn-sm" style="margin-top:10px" onclick='openComplaintRetrain(${JSON.stringify(c).replace(/'/g,"&#39;")})'>✏️ Retrain this task</button>` : ''}
+    </div>`;
+  }).join('');
+}
+
+async function deleteComplaint(id){
+  try{
+    await api('DELETE','/admin/complaints/'+id);
+    window._complaints=(window._complaints||[]).filter(c=>c.id!==id);
+    renderComplaints(); loadStats();
+  }catch(e){ toast('Error','err'); }
+}
+
+async function clearComplaints(){
+  if(!confirm('Clear ALL complaints?')) return;
+  try{
+    await api('POST','/admin/complaints/clear');
+    window._complaints=[]; renderComplaints(); loadStats();
+    toast('Cleared','ok');
+  }catch(e){ toast('Error','err'); }
+}
+
+// Open the trainer modal for the complained task so admin can fix it
+function openComplaintRetrain(c){
+  const entry={
+    imageKey:c.imageKey, imageSrc:c.imageSrc, objectName:c.objectName,
+    taskText:'', selectedSquares:c.trainedSquares||[], noObject:c.trainedNoObject||false,
+    gridRows:c.gridRows||3, gridCols:c.gridCols||3, taskNumber:c.taskNumber, trainedAt:new Date().toISOString()
+  };
+  openModal(entry);
 }
 
 function renderTrained(){
