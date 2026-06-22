@@ -30,13 +30,18 @@ const getTrained  = () => readJSON('trained.json');
 const getUsage    = () => readJSON('usage.json');
 const getComplaints = () => readJSON('complaints.json');
 
-const saveClients  = d => writeJSON('clients.json', d);
-const saveKB       = d => writeJSON('kb.json', d);
-const saveSquareKB = d => writeJSON('square_kb.json', d);
-const saveUnsolved = d => writeJSON('unsolved.json', d);
-const saveTrained  = d => writeJSON('trained.json', d);
+// ── Caches (declared early so save functions can clear them) ──
+let _lightKBCache = null, _squareKBCache = null;
+let _statsCache = null, _statsCacheTime = 0;
+function invalidateKBCache() { _lightKBCache = null; _squareKBCache = null; }
+
+const saveClients  = d => { _statsCache=null; return writeJSON('clients.json', d); };
+const saveKB       = d => { invalidateKBCache(); _statsCache=null; return writeJSON('kb.json', d); };
+const saveSquareKB = d => { invalidateKBCache(); _statsCache=null; return writeJSON('square_kb.json', d); };
+const saveUnsolved = d => { _statsCache=null; return writeJSON('unsolved.json', d); };
+const saveTrained  = d => { _statsCache=null; return writeJSON('trained.json', d); };
 const saveUsage    = d => writeJSON('usage.json', d);
-const saveComplaints = d => writeJSON('complaints.json', d);
+const saveComplaints = d => { _statsCache=null; return writeJSON('complaints.json', d); };
 
 const ADMIN_PASS = process.env.ADMIN_PASS || 'admin123';
 function isAdmin(req) { return req.headers['x-admin-pass'] === ADMIN_PASS; }
@@ -106,28 +111,8 @@ app.get('/api/kb-version', (req, res) => {
   });
 });
 
-app.get('/api/kb', (req, res) => {
-  const apiKey = req.headers['x-api-key'] || req.query.apikey;
-  const client = getClientInfo(apiKey);
-  if (!client) return res.status(401).json({ error: 'Invalid API key' });
-
-  // Check if client is active
-  if (client.active === false) {
-    return res.status(403).json({ error: 'Account suspended', code: 'SUSPENDED' });
-  }
-
-  // Check daily limit
-  const { count } = getClientUsage(apiKey);
-  const plan = client.plan || 1000;
-  if (count >= plan) {
-    return res.status(403).json({ 
-      error: 'Daily limit reached. Upgrade your plan.', 
-      code: 'LIMIT_REACHED',
-      used: count, limit: plan
-    });
-  }
-
-  // Strip imageSrc to save bandwidth
+// Build light KB (no images). Rebuilt only when training changes.
+function buildKBCache() {
   const kb = getKB();
   const lightKB = {};
   for (const [key, val] of Object.entries(kb)) {
@@ -140,7 +125,33 @@ app.get('/api/kb', (req, res) => {
       taskNumber: val.taskNumber
     };
   }
-  res.json({ kb: lightKB, squareKB: getSquareKB(), updatedAt: new Date().toISOString() });
+  _lightKBCache = lightKB;
+  _squareKBCache = getSquareKB();
+}
+
+app.get('/api/kb', (req, res) => {
+  const apiKey = req.headers['x-api-key'] || req.query.apikey;
+  const client = getClientInfo(apiKey);
+  if (!client) return res.status(401).json({ error: 'Invalid API key' });
+
+  if (client.active === false) {
+    return res.status(403).json({ error: 'Account suspended', code: 'SUSPENDED' });
+  }
+
+  const { count } = getClientUsage(apiKey);
+  const plan = client.plan || 1000;
+  if (count >= plan) {
+    return res.status(403).json({ 
+      error: 'Daily limit reached. Upgrade your plan.', 
+      code: 'LIMIT_REACHED',
+      used: count, limit: plan
+    });
+  }
+
+  // Use cached light KB (rebuilt only when training changes) — much faster,
+  // avoids re-reading and stripping the large kb.json on every client request.
+  if (!_lightKBCache || !_squareKBCache) buildKBCache();
+  res.json({ kb: _lightKBCache, squareKB: _squareKBCache, updatedAt: new Date().toISOString() });
 });
 
 app.post('/api/unsolved', (req, res) => {
@@ -175,21 +186,29 @@ app.post('/admin/login', (req, res) => {
   res.json({ ok: req.body.password === ADMIN_PASS, token: req.body.password === ADMIN_PASS ? ADMIN_PASS : null });
 });
 
+// Stats are cached briefly so the every-8s dashboard poll doesn't re-read
+// large data files from disk each time.
 app.get('/admin/stats', (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
+  const now = Date.now();
+  if (_statsCache && (now - _statsCacheTime) < 15000) {
+    return res.json(_statsCache);   // serve cached (valid for 15s)
+  }
   const unsolved = getUnsolved(); const trained = getTrained();
   const clients = getClients(); const sqKB = getSquareKB();
   const usage = getUsage(); const today = getTodayKey();
   const complaints = getComplaints();
   let tasksToday = 0;
   for (const k of Object.keys(usage)) tasksToday += (usage[k][today] || 0);
-  res.json({
+  _statsCache = {
     unsolved: Object.values(unsolved).filter(e=>e.status==='pending').length,
     trained: Object.keys(trained).length,
     clients: Object.keys(clients).length,
     squareKB: Object.keys(sqKB).length, tasksToday,
     complaints: Object.keys(complaints).length
-  });
+  };
+  _statsCacheTime = now;
+  res.json(_statsCache);
 });
 
 app.get('/admin/unsolved', (req, res) => {
