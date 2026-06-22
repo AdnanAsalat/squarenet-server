@@ -456,7 +456,7 @@ function renderComplaints(){
           <div style="font-size:10px;color:#22c55e;margin-top:4px">Your training</div>
         </div>
       </div>
-      ${c.isTrained ? `<button class="btn btn-amber btn-sm" style="margin-top:10px" onclick='openComplaintRetrain(${JSON.stringify(c).replace(/'/g,"&#39;")})'>✏️ Retrain this task</button>` : ''}
+      ${c.isTrained ? `<button class="btn btn-amber btn-sm" style="margin-top:10px" onclick="openComplaintRetrain('${c.id}')">✏️ Retrain this task</button>` : ''}
     </div>`;
   }).join('');
 }
@@ -479,7 +479,9 @@ async function clearComplaints(){
 }
 
 // Open the trainer modal for the complained task so admin can fix it
-function openComplaintRetrain(c){
+function openComplaintRetrain(id){
+  const c=(window._complaints||[]).find(x=>x.id===id);
+  if(!c) return;
   const entry={
     imageKey:c.imageKey, imageSrc:c.imageSrc, objectName:c.objectName,
     taskText:'', selectedSquares:c.trainedSquares||[], noObject:c.trainedNoObject||false,
