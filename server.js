@@ -28,6 +28,7 @@ const getSquareKB = () => readJSON('square_kb.json');
 const getUnsolved = () => readJSON('unsolved.json');
 const getTrained  = () => readJSON('trained.json');
 const getUsage    = () => readJSON('usage.json');
+const getComplaints = () => readJSON('complaints.json');
 
 const saveClients  = d => writeJSON('clients.json', d);
 const saveKB       = d => writeJSON('kb.json', d);
@@ -35,6 +36,7 @@ const saveSquareKB = d => writeJSON('square_kb.json', d);
 const saveUnsolved = d => writeJSON('unsolved.json', d);
 const saveTrained  = d => writeJSON('trained.json', d);
 const saveUsage    = d => writeJSON('usage.json', d);
+const saveComplaints = d => writeJSON('complaints.json', d);
 
 const ADMIN_PASS = process.env.ADMIN_PASS || 'admin123';
 function isAdmin(req) { return req.headers['x-admin-pass'] === ADMIN_PASS; }
@@ -178,13 +180,15 @@ app.get('/admin/stats', (req, res) => {
   const unsolved = getUnsolved(); const trained = getTrained();
   const clients = getClients(); const sqKB = getSquareKB();
   const usage = getUsage(); const today = getTodayKey();
+  const complaints = getComplaints();
   let tasksToday = 0;
   for (const k of Object.keys(usage)) tasksToday += (usage[k][today] || 0);
   res.json({
     unsolved: Object.values(unsolved).filter(e=>e.status==='pending').length,
     trained: Object.keys(trained).length,
     clients: Object.keys(clients).length,
-    squareKB: Object.keys(sqKB).length, tasksToday
+    squareKB: Object.keys(sqKB).length, tasksToday,
+    complaints: Object.keys(complaints).length
   });
 });
 
@@ -210,6 +214,70 @@ app.get('/admin/trained', (req, res) => {
 
 // Fix duplicate/missing task numbers — renumber all trained tasks uniquely
 // by trained date (oldest = #1). Safe to run anytime.
+// ── COMPLAINTS ──────────────────────────────────────────────
+// Client reports a wrong solve. Captures task #, object, how it was solved,
+// and the original training so admin can compare & retrain.
+app.post('/api/complaint', (req, res) => {
+  const apiKey = req.headers['x-api-key'] || req.query.apikey;
+  const client = getClientInfo(apiKey);
+  if (!client) return res.status(401).json({ error: 'Invalid API key' });
+
+  const { imageKey, objectName, taskNumber, solvedSquares, noObjectSolved, imageSrc } = req.body;
+  if (!imageKey) return res.status(400).json({ error: 'Missing imageKey' });
+
+  const complaints = getComplaints();
+  const trained = getTrained();
+  const original = trained[imageKey] || null;   // the training that produced this solve
+
+  const id = uuidv4();
+  complaints[id] = {
+    id,
+    imageKey,
+    objectName: objectName || (original && original.objectName) || '?',
+    taskNumber: taskNumber || (original && original.taskNumber) || null,
+    imageSrc: imageSrc || (original && original.imageSrc) || '',
+    // How the extension actually solved it (what client saw)
+    solvedSquares: solvedSquares || [],
+    noObjectSolved: !!noObjectSolved,
+    // The stored training at time of complaint (for comparison)
+    trainedSquares: original ? (original.selectedSquares || []) : [],
+    trainedNoObject: original ? !!original.noObject : null,
+    gridRows: original ? (original.gridRows||3) : 3,
+    gridCols: original ? (original.gridCols||3) : 3,
+    isTrained: !!original,
+    clientName: client.name || '?',
+    clientEmail: client.email || '',
+    createdAt: new Date().toISOString(),
+    status: 'open'
+  };
+  saveComplaints(complaints);
+  res.json({ ok: true });
+});
+
+app.get('/admin/complaints', (req, res) => {
+  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
+  const list = Object.values(getComplaints())
+    .sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
+  res.json({ list, count: list.length });
+});
+
+app.delete('/admin/complaints/:id', (req, res) => {
+  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
+  const complaints = getComplaints();
+  delete complaints[req.params.id];
+  saveComplaints(complaints);
+  res.json({ ok: true });
+});
+
+// Clear all resolved/all complaints
+app.post('/admin/complaints/clear', (req, res) => {
+  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
+  saveComplaints({});
+  res.json({ ok: true });
+});
+
+// ── COMPLAINTS END ──────────────────────────────────────────
+
 app.post('/admin/renumber', (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
   const kb = getKB();
