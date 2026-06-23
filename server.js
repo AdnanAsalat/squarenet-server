@@ -175,10 +175,18 @@ app.post('/api/unsolved', (req, res) => {
   if (!imageKey || !imageSrc) return res.status(400).json({ error: 'Missing data' });
   const unsolved = getUnsolved();
   if (unsolved[imageKey]) return res.json({ ok: true, status: 'already_exists' });
+  // Build ordered cellHashes from squareImages (for duplicate detection)
+  let cellHashes = null;
+  if (Array.isArray(squareImages) && squareImages.length) {
+    cellHashes = [];
+    for (const s of squareImages) {
+      if (s && s.index != null) cellHashes[s.index] = s.src || '';
+    }
+  }
   unsolved[imageKey] = {
     id: uuidv4(), imageKey, imageSrc, taskText: taskText||'',
     objectName: objectName||'unknown', gridInfo: gridInfo||null,
-    squareImages: squareImages||[], submittedBy: client.name,
+    squareImages: squareImages||[], cellHashes, submittedBy: client.name,
     submittedAt: new Date().toISOString(), status: 'pending'
   };
   saveUnsolved(unsolved);
@@ -362,25 +370,36 @@ app.get('/admin/needs-cells', (req, res) => {
   res.json({ list, count: list.length });
 });
 
-// Find groups of trained tasks that are the SAME image by content (cell hashes).
-// Returns groups so admin can review/clean duplicates created before content-matching.
+// Two tasks are duplicates ONLY if their cell hashes are byte-for-byte identical
+// (zero difference). This is strict so we never delete genuinely different tasks.
 function cellsMatch(a, b) {
   if (!a || !b || a.length !== b.length) return false;
-  let total = 0;
   for (let i = 0; i < a.length; i++) {
-    if (!a[i] || !b[i] || a[i].length !== b[i].length) return false;
-    let d = 0; for (let j = 0; j < a[i].length; j++) if (a[i][j] !== b[i][j]) d++;
-    if (d > 2) return false;
-    total += d;
+    if (a[i] !== b[i]) return false;   // any difference at all → not a duplicate
   }
-  return total <= a.length;
+  return true;
 }
 
 app.get('/admin/duplicates', (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
   const trained = getTrained();
-  // Only tasks that have cell hashes (content) can be compared
-  const items = Object.values(trained).filter(t => t.cellHashes && t.cellHashes.length && !t.noObject);
+  const unsolved = getUnsolved();
+
+  // Collect comparable items from BOTH trained and unsolved that have cell hashes.
+  const items = [];
+  for (const t of Object.values(trained)) {
+    if (t.cellHashes && t.cellHashes.length && !t.noObject) {
+      items.push({ imageKey:t.imageKey, taskNumber:t.taskNumber||null, objectName:t.objectName||'?',
+        imageSrc:t.imageSrc||'', source:'trained', cellHashes:t.cellHashes });
+    }
+  }
+  for (const u of Object.values(unsolved)) {
+    if (u.cellHashes && u.cellHashes.length) {
+      items.push({ imageKey:u.imageKey, taskNumber:null, objectName:u.objectName||'?',
+        imageSrc:u.imageSrc||'', source:'unsolved', cellHashes:u.cellHashes });
+    }
+  }
+
   const used = new Set();
   const groups = [];
   for (let i = 0; i < items.length; i++) {
@@ -388,6 +407,7 @@ app.get('/admin/duplicates', (req, res) => {
     const group = [items[i]];
     for (let j = i+1; j < items.length; j++) {
       if (used.has(items[j].imageKey)) continue;
+      // EXACT content match only (cellsMatch now requires byte-identical hashes)
       if (items[i].objectName === items[j].objectName && cellsMatch(items[i].cellHashes, items[j].cellHashes)) {
         group.push(items[j]);
         used.add(items[j].imageKey);
@@ -395,10 +415,10 @@ app.get('/admin/duplicates', (req, res) => {
     }
     if (group.length > 1) {
       used.add(items[i].imageKey);
-      // keep the oldest (lowest taskNumber) as the "keeper"
-      group.sort((a,b)=>(a.taskNumber||0)-(b.taskNumber||0));
+      group.sort((a,b)=>(a.taskNumber||999999)-(b.taskNumber||999999));
       groups.push(group.map(g => ({
-        imageKey:g.imageKey, taskNumber:g.taskNumber, objectName:g.objectName, imageSrc:g.imageSrc
+        imageKey:g.imageKey, taskNumber:g.taskNumber, objectName:g.objectName,
+        imageSrc:g.imageSrc, source:g.source
       })));
     }
   }
@@ -406,19 +426,21 @@ app.get('/admin/duplicates', (req, res) => {
   res.json({ groups, groupCount: groups.length, duplicateCount: dupCount });
 });
 
-// Delete a list of duplicate imageKeys (admin confirms which to remove)
+// Delete specific tasks by imageKey (from trained AND/OR unsolved)
 app.post('/admin/delete-duplicates', (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
   const { imageKeys } = req.body;
   if (!Array.isArray(imageKeys)) return res.status(400).json({ error: 'Missing imageKeys' });
-  const kb = getKB(); const trained = getTrained(); const sqKB = getSquareKB();
+  const kb = getKB(); const trained = getTrained(); const unsolved = getUnsolved();
   let removed = 0;
   for (const k of imageKeys) {
-    if (trained[k] || kb[k]) {
-      delete trained[k]; delete kb[k]; removed++;
-    }
+    let hit = false;
+    if (trained[k]) { delete trained[k]; hit = true; }
+    if (kb[k]) { delete kb[k]; hit = true; }
+    if (unsolved[k]) { delete unsolved[k]; hit = true; }
+    if (hit) removed++;
   }
-  saveKB(kb); saveTrained(trained);
+  saveKB(kb); saveTrained(trained); saveUnsolved(unsolved);
   res.json({ ok: true, removed });
 });
 
