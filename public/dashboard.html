@@ -179,6 +179,7 @@ input:focus{border-color:var(--accent)}
         <input class="search" id="search-trained" placeholder="🔍 Search..." oninput="renderTrained()">
         <div class="spacer"></div>
         <button class="btn btn-amber btn-sm" onclick="renumberTasks()">🔢 Fix Numbers</button>
+        <button class="btn btn-green btn-sm" onclick="backfillCells()">🔒 Secure All Tasks</button>
         <button class="btn btn-ghost btn-sm" onclick="loadTrained(true)">🔄 Refresh</button>
       </div>
       <div class="grid-scroll">
@@ -444,6 +445,65 @@ async function loadTrained(force){
     // Save to IndexedDB for next time
     tdbSet('trained',{ version: (d.version!=null?d.version:serverVer), list: trainedData });
   }catch(e){}
+}
+
+// Compute & store per-cell hashes for ALL old tasks that don't have them yet,
+// so every trained task gets strict exact-cell verification (zero wrong solves).
+async function backfillCells(){
+  if(!confirm('Secure all tasks?\n\nThis adds exact cell-verification to every old task so they can NEVER be solved wrongly. It processes all images in your browser — may take a few minutes for many tasks. You can keep using the dashboard after it finishes.')) return;
+  let needs=[];
+  try{
+    const d=await api('GET','/admin/needs-cells');
+    needs=d.list||[];
+  }catch(e){ toast('Error loading list','err'); return; }
+
+  if(!needs.length){ toast('✅ All tasks already secured!','ok'); return; }
+
+  toast(`Securing ${needs.length} tasks... please wait`,'inf');
+  let done=0, failed=0;
+  for(const t of needs){
+    try{
+      // Build ordered cell hashes from the stored image (no "isObject" needed here)
+      const cells=await buildCellHashesOnly(t.imageSrc, t.gridRows||3, t.gridCols||3);
+      if(cells && cells.length){
+        const r=await api('POST','/admin/backfill-cells',{ imageKey:t.imageKey, cellHashes:cells });
+        if(r.ok) done++; else failed++;
+      } else failed++;
+    }catch(e){ failed++; }
+    // Progress toast every 25
+    if((done+failed)%25===0){ toast(`Securing... ${done+failed}/${needs.length}`,'inf'); }
+  }
+  toast(`✅ Secured ${done} tasks${failed?(', '+failed+' failed'):''}`,'ok');
+  // Refresh cache so the new hashes are reflected
+  window._trainedLoaded=false;
+  loadTrained(true);
+}
+
+// Build just the ordered array of cell pHashes for an image (index 0..n)
+function buildCellHashesOnly(src,rows,cols){
+  return new Promise(resolve=>{
+    const img=new Image();
+    img.onload=()=>{
+      const cw=Math.floor(img.width/cols),ch=Math.floor(img.height/rows);
+      const out=[];
+      for(let r=0;r<rows;r++) for(let c=0;c<cols;c++){
+        const canvas=document.createElement('canvas'); canvas.width=8; canvas.height=8;
+        const ctx=canvas.getContext('2d',{willReadFrequently:true});
+        let hash='';
+        try{
+          ctx.drawImage(img,c*cw,r*ch,cw,ch,0,0,8,8);
+          const data=ctx.getImageData(0,0,8,8).data;
+          const g=[]; for(let i=0;i<data.length;i+=4) g.push(data[i]*.299+data[i+1]*.587+data[i+2]*.114);
+          const avg=g.reduce((a,b)=>a+b,0)/g.length;
+          hash=g.map(v=>v>avg?'1':'0').join('');
+        }catch(e){}
+        out.push(hash);
+      }
+      resolve(out);
+    };
+    img.onerror=()=>resolve(null);
+    img.src=src;
+  });
 }
 
 async function renumberTasks(){
