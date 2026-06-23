@@ -154,6 +154,7 @@ input:focus{border-color:var(--accent)}
     <div class="tab" data-tab="trained">✅ Trained</div>
     <div class="tab" data-tab="clients">👥 Clients</div>
     <div class="tab" data-tab="complaints">⚠️ Complaints <span id="comp-badge" style="display:none;background:#dc2626;color:#fff;border-radius:10px;padding:0 6px;font-size:10px;margin-left:4px"></span></div>
+    <div class="tab" data-tab="duplicates">👯 Duplicates <span id="dup-badge" style="display:none;background:#f59e0b;color:#000;border-radius:10px;padding:0 6px;font-size:10px;margin-left:4px"></span></div>
   </div>
 
   <div class="panes">
@@ -180,7 +181,6 @@ input:focus{border-color:var(--accent)}
         <div class="spacer"></div>
         <button class="btn btn-amber btn-sm" onclick="renumberTasks()">🔢 Fix Numbers</button>
         <button class="btn btn-green btn-sm" onclick="backfillCells()">🔒 Secure All Tasks</button>
-        <button class="btn btn-amber btn-sm" onclick="findDuplicates()">👯 Find Duplicates</button>
         <button class="btn btn-ghost btn-sm" onclick="loadTrained(true)">🔄 Refresh</button>
       </div>
       <div class="grid-scroll">
@@ -210,6 +210,19 @@ input:focus{border-color:var(--accent)}
       </div>
       <div class="grid-scroll">
         <div id="complaints-list"><div class="no-items">Loading...</div></div>
+      </div>
+    </div>
+
+    <!-- DUPLICATES -->
+    <div class="pane" id="pane-duplicates">
+      <div class="toolbar">
+        <span style="color:var(--muted);font-size:13px">Same image trained/submitted more than once</span>
+        <div class="spacer"></div>
+        <span id="dup-count" style="font-size:12px;color:var(--muted);margin-right:10px"></span>
+        <button class="btn btn-ghost btn-sm" onclick="loadDuplicates()">🔄 Scan</button>
+      </div>
+      <div class="grid-scroll">
+        <div id="duplicates-list"><div class="no-items">Press "Scan" to find duplicates</div></div>
       </div>
     </div>
   </div>
@@ -337,6 +350,7 @@ function initApp(){
     if(t.dataset.tab==='trained' && !window._trainedLoaded) loadTrained();
     if(t.dataset.tab==='clients') loadClients();
     if(t.dataset.tab==='complaints') loadComplaints();
+    if(t.dataset.tab==='duplicates') loadDuplicates();
   }));
   loadStats(); loadUnsolved();
   // Auto-refresh ONLY the unsolved tab (new tasks arrive there).
@@ -522,32 +536,56 @@ function buildCellHashesOnly(src,rows,cols){
   });
 }
 
-// Find duplicate trained tasks (same image by content) and offer to clean them.
-async function findDuplicates(){
-  toast('Scanning for duplicates...','inf');
+// ── DUPLICATES (display only — delete is manual per item) ──────
+async function loadDuplicates(){
+  const el=document.getElementById('duplicates-list');
+  el.innerHTML='<div class="no-items">Scanning...</div>';
   let data;
   try{ data=await api('GET','/admin/duplicates'); }
-  catch(e){ toast('Error scanning','err'); return; }
+  catch(e){ el.innerHTML='<div class="no-items">Error scanning</div>'; return; }
 
-  const groups=data.groups||[];
-  if(!groups.length){ toast('✅ No duplicates found!','ok'); return; }
+  window._dupGroups=data.groups||[];
+  const badge=document.getElementById('dup-badge');
+  const cnt=document.getElementById('dup-count');
+  if(cnt) cnt.textContent = data.duplicateCount ? `${data.duplicateCount} extra copies in ${data.groupCount} groups` : '';
+  if(badge){ if(data.duplicateCount){badge.style.display='inline-block';badge.textContent=data.duplicateCount;}else{badge.style.display='none';} }
 
-  // Collect the imageKeys to remove (keep the FIRST/oldest in each group)
-  const toDelete=[];
-  groups.forEach(g=>{ for(let i=1;i<g.length;i++) toDelete.push(g[i].imageKey); });
+  if(!data.groups || !data.groups.length){
+    el.innerHTML='<div class="no-items">✅ No duplicates found</div>';
+    return;
+  }
 
-  const msg=`Found ${data.groupCount} duplicate groups (${data.duplicateCount} extra copies).\n\n`
-    +`This will KEEP the oldest task in each group and DELETE the ${data.duplicateCount} extra copies.\n\n`
-    +`The kept task still solves these images (content matching). Proceed?`;
-  if(!confirm(msg)) { toast('Cancelled — nothing deleted','inf'); return; }
+  el.innerHTML=data.groups.map((g,gi)=>{
+    const cards=g.map((t,ti)=>`
+      <div style="background:var(--panel);border:1px solid ${ti===0?'#22c55e':'var(--border)'};border-radius:10px;padding:8px;text-align:center;width:150px">
+        <img src="${t.imageSrc||''}" style="width:130px;height:130px;object-fit:cover;border-radius:6px" loading="lazy">
+        <div style="font-size:11px;color:#c4b5fd;margin-top:4px">#${t.taskNumber||'?'} ${t.objectName||''}</div>
+        <div style="font-size:9px;color:var(--muted)">${t.source}${ti===0?' • KEEP':''}</div>
+        ${ti===0
+          ? '<div style="font-size:10px;color:#22c55e;margin-top:4px">✅ Keeper</div>'
+          : `<button class="btn btn-danger btn-sm" style="margin-top:6px;width:100%" onclick="deleteDupOne('${t.imageKey}',${gi})">🗑 Delete</button>`}
+      </div>`).join('');
+    return `
+      <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:12px">
+        <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Group ${gi+1} — "${g[0].objectName}" (${g.length} copies)</div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-start">${cards}</div>
+      </div>`;
+  }).join('');
+}
 
+async function deleteDupOne(imageKey,groupIndex){
+  if(!confirm('Delete this duplicate copy?')) return;
   try{
-    const r=await api('POST','/admin/delete-duplicates',{ imageKeys: toDelete });
+    const r=await api('POST','/admin/delete-duplicates',{ imageKeys:[imageKey] });
     if(r.ok){
-      toast(`✅ Removed ${r.removed} duplicates!`,'ok');
-      window._trainedLoaded=false;
-      loadTrained(true);
+      toast('🗑 Deleted','ok');
+      // Remove from local group display
+      if(window._dupGroups && window._dupGroups[groupIndex]){
+        window._dupGroups[groupIndex]=window._dupGroups[groupIndex].filter(t=>t.imageKey!==imageKey);
+      }
       loadStats();
+      window._trainedLoaded=false;   // trained list will refresh on next open
+      loadDuplicates();              // re-scan to refresh view
     } else { toast('Error: '+(r.error||'?'),'err'); }
   }catch(e){ toast('Error: '+e.message,'err'); }
 }
