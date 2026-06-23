@@ -179,7 +179,7 @@ input:focus{border-color:var(--accent)}
         <input class="search" id="search-trained" placeholder="🔍 Search..." oninput="renderTrained()">
         <div class="spacer"></div>
         <button class="btn btn-amber btn-sm" onclick="renumberTasks()">🔢 Fix Numbers</button>
-        <button class="btn btn-ghost btn-sm" onclick="loadTrained()">🔄 Refresh</button>
+        <button class="btn btn-ghost btn-sm" onclick="loadTrained(true)">🔄 Refresh</button>
       </div>
       <div class="grid-scroll">
         <div class="grid-list" id="trained-list"><div class="no-items">Loading...</div></div>
@@ -248,6 +248,35 @@ input:focus{border-color:var(--accent)}
 const SERVER = location.origin; // same origin since dashboard is served from server
 let PASS = '';
 let unsolvedData=[], trainedData=[], clientsData={};
+
+// ── IndexedDB cache for trained data (persists across browser close/reload) ──
+const TDB_NAME='aacaptcha_trained', TDB_STORE='kv';
+function tdbOpen(){
+  return new Promise((resolve,reject)=>{
+    const r=indexedDB.open(TDB_NAME,1);
+    r.onupgradeneeded=()=>{ r.result.createObjectStore(TDB_STORE); };
+    r.onsuccess=()=>resolve(r.result);
+    r.onerror=()=>reject(r.error);
+  });
+}
+async function tdbGet(key){
+  try{
+    const db=await tdbOpen();
+    return await new Promise((resolve)=>{
+      const tx=db.transaction(TDB_STORE,'readonly').objectStore(TDB_STORE).get(key);
+      tx.onsuccess=()=>resolve(tx.result); tx.onerror=()=>resolve(null);
+    });
+  }catch(e){ return null; }
+}
+async function tdbSet(key,val){
+  try{
+    const db=await tdbOpen();
+    return await new Promise((resolve)=>{
+      const tx=db.transaction(TDB_STORE,'readwrite').objectStore(TDB_STORE).put(val,key);
+      tx.onsuccess=()=>resolve(true); tx.onerror=()=>resolve(false);
+    });
+  }catch(e){ return false; }
+}
 let modalEntry=null, selectedCells=new Set(), taskCounter=0;
 
 // ── LOGIN ──────────────────────────────────────────────────────
@@ -379,8 +408,42 @@ function renderUnsolved(){
 }
 
 // ── TRAINED ─────────────────────────────────────────────────────
-async function loadTrained(){
-  try{ const d=await api('GET','/admin/trained'); trainedData=d.list||[]; window._trainedTotal=d.total||d.count||0; window._trainedLoaded=true; renderTrained(); }catch(e){}
+// Save current trainedData to IndexedDB tagged with the server's latest version,
+// so reopening the browser loads instantly from cache without a big download.
+async function refreshTrainedCache(){
+  try{
+    const v=await api('GET','/admin/trained-version');
+    tdbSet('trained',{ version: v.version, list: trainedData });
+  }catch(e){}
+}
+
+async function loadTrained(force){
+  try{
+    // 1) Check the server's trained version (tiny, fast request)
+    let serverVer = null;
+    try{ const v=await api('GET','/admin/trained-version'); serverVer=v.version; }catch(e){}
+
+    // 2) If not forcing, try the IndexedDB cache and compare versions
+    if(!force && serverVer!=null){
+      const cached=await tdbGet('trained');
+      if(cached && cached.version===serverVer && Array.isArray(cached.list)){
+        trainedData=cached.list;
+        window._trainedTotal=cached.list.length;
+        window._trainedLoaded=true;
+        renderTrained();
+        return;   // ✅ loaded from local cache — no big download
+      }
+    }
+
+    // 3) Version changed (or no cache / forced) → download fresh and cache it
+    const d=await api('GET','/admin/trained');
+    trainedData=d.list||[];
+    window._trainedTotal=d.total||d.count||0;
+    window._trainedLoaded=true;
+    renderTrained();
+    // Save to IndexedDB for next time
+    tdbSet('trained',{ version: (d.version!=null?d.version:serverVer), list: trainedData });
+  }catch(e){}
 }
 
 async function renumberTasks(){
@@ -391,7 +454,7 @@ async function renumberTasks(){
     if(d.ok){
       toast(`✅ Done! ${d.renumbered} tasks renumbered.`,'ok');
       window._trainedLoaded=false;
-      loadTrained();
+      loadTrained(true);
       loadStats();
     } else {
       toast('Error: '+(d.error||'?'),'err');
@@ -684,6 +747,8 @@ async function saveTrain(noObject){
         if(t){ t.taskNumber=d.taskNumber; if(window._trainedLoaded) renderTrained(); }
       }
       loadStats();
+      // Refresh local cache to the new server version (so next open is correct & instant)
+      refreshTrainedCache();
     } else {
       window._recentlyTrained.delete(entry.imageKey);  // allow it back
       trainedData = trainedData.filter(e=>e.imageKey!==entry.imageKey);
@@ -708,9 +773,9 @@ async function deleteTrained(){
   toast('🗑 Deleted','ok');
   try{
     const d=await api('DELETE','/admin/trained/'+encodeURIComponent(entry.imageKey));
-    if(d.ok){ loadStats(); }
-    else { toast('Delete failed: '+(d.error||'?'),'err'); loadTrained(); }
-  }catch(e){ toast('Delete error: '+e.message,'err'); loadTrained(); }
+    if(d.ok){ loadStats(); refreshTrainedCache(); }
+    else { toast('Delete failed: '+(d.error||'?'),'err'); loadTrained(true); }
+  }catch(e){ toast('Delete error: '+e.message,'err'); loadTrained(true); }
 }
 
 async function buildPHashes(src,rows,cols,noObject,cellsCopy){
