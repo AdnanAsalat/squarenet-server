@@ -35,11 +35,23 @@ let _lightKBCache = null, _squareKBCache = null;
 let _statsCache = null, _statsCacheTime = 0;
 function invalidateKBCache() { _lightKBCache = null; _squareKBCache = null; }
 
+// Trained "version" — a number that changes whenever trained data changes.
+// The dashboard uses this to skip re-downloading trained data if nothing changed.
+function getTrainedVersion() {
+  try { return JSON.parse(fs.readFileSync(path.join(DATA_DIR,'trained_version.json'),'utf8')).v || 0; }
+  catch(e) { return 0; }
+}
+function bumpTrainedVersion() {
+  const v = getTrainedVersion() + 1;
+  try { fs.writeFileSync(path.join(DATA_DIR,'trained_version.json'), JSON.stringify({v}), 'utf8'); } catch(e){}
+  return v;
+}
+
 const saveClients  = d => { _statsCache=null; return writeJSON('clients.json', d); };
 const saveKB       = d => { invalidateKBCache(); _statsCache=null; return writeJSON('kb.json', d); };
 const saveSquareKB = d => { invalidateKBCache(); _statsCache=null; return writeJSON('square_kb.json', d); };
 const saveUnsolved = d => { _statsCache=null; return writeJSON('unsolved.json', d); };
-const saveTrained  = d => { _statsCache=null; return writeJSON('trained.json', d); };
+const saveTrained  = d => { _statsCache=null; bumpTrainedVersion(); return writeJSON('trained.json', d); };
 const saveUsage    = d => writeJSON('usage.json', d);
 const saveComplaints = d => { _statsCache=null; return writeJSON('complaints.json', d); };
 
@@ -223,12 +235,18 @@ app.get('/admin/unsolved', (req, res) => {
   res.json({ list, count: list.length, total: all.length, offset, limit });
 });
 
+// Lightweight: just the current trained version number (tiny, fast).
+// Dashboard calls this first; only re-downloads trained data if version changed.
+app.get('/admin/trained-version', (req, res) => {
+  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
+  res.json({ version: getTrainedVersion() });
+});
+
 app.get('/admin/trained', (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
   const trained = getTrained();
-  // Return all trained — dashboard loads this once and caches it.
   const list = Object.values(trained).sort((a,b)=>new Date(b.trainedAt)-new Date(a.trainedAt));
-  res.json({ list, count: list.length, total: list.length });
+  res.json({ list, count: list.length, total: list.length, version: getTrainedVersion() });
 });
 
 // Fix duplicate/missing task numbers — renumber all trained tasks uniquely
