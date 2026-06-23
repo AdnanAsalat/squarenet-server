@@ -286,8 +286,37 @@ app.post('/api/complaint', (req, res) => {
 
 app.get('/admin/complaints', (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
+  const trained = getTrained();
+  // Build quick lookups by taskNumber and objectName
+  const byNum = {}, byObj = {};
+  for (const t of Object.values(trained)) {
+    if (t.taskNumber != null) byNum[t.taskNumber] = t;
+    if (t.objectName) byObj[t.objectName] = t;   // last one wins (most recent-ish)
+  }
+
   const list = Object.values(getComplaints())
-    .sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
+    .sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt))
+    .map(c => {
+      // Re-resolve training FRESH on every load (so it reflects current DB,
+      // independent of whether the dashboard's trained tab is loaded).
+      let t = trained[c.imageKey] || null;
+      if (!t && c.taskNumber != null) t = byNum[c.taskNumber] || null;
+      if (!t && c.objectName) t = byObj[c.objectName] || null;
+      if (t) {
+        return {
+          ...c,
+          isTrained: true,
+          trainedSquares: t.selectedSquares || [],
+          trainedNoObject: !!t.noObject,
+          gridRows: t.gridRows || c.gridRows || 3,
+          gridCols: t.gridCols || c.gridCols || 3,
+          taskNumber: c.taskNumber || t.taskNumber,
+          imageSrc: c.imageSrc || t.imageSrc || ''
+        };
+      }
+      return { ...c, isTrained: false };
+    });
+
   res.json({ list, count: list.length });
 });
 
