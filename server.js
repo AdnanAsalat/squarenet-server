@@ -263,36 +263,19 @@ app.post('/api/complaint', (req, res) => {
   if (!imageKey) return res.status(400).json({ error: 'Missing imageKey' });
 
   const complaints = getComplaints();
-  const trained = getTrained();
 
-  // Find the training that produced this solve:
-  // 1) Exact full-image match (imageKey), OR
-  // 2) Same task number, OR
-  // 3) Same object name (covers per-square-matched solves whose full-image
-  //    fingerprint isn't stored as a full task).
-  let original = trained[imageKey] || null;
-  if (!original && taskNumber) {
-    original = Object.values(trained).find(t => t.taskNumber === taskNumber) || null;
-  }
-  if (!original && objectName) {
-    original = Object.values(trained).find(t => t.objectName === objectName) || null;
-  }
-
+  // Store the RAW complaint exactly as the client reported it. We do NOT guess
+  // the training here — matching is done at load time, ONLY by exact imageKey,
+  // so we never show a different task that merely shares a number/name.
   const id = uuidv4();
   complaints[id] = {
     id,
     imageKey,
-    objectName: objectName || (original && original.objectName) || '?',
-    taskNumber: taskNumber || (original && original.taskNumber) || null,
-    imageSrc: imageSrc || (original && original.imageSrc) || '',
-    solvedSquares: solvedSquares || [],
+    objectName: objectName || '?',
+    taskNumber: taskNumber || null,       // what the client saw at solve time
+    imageSrc: imageSrc || '',             // the actual task image
+    solvedSquares: solvedSquares || [],   // what the extension clicked
     noObjectSolved: !!noObjectSolved,
-    trainedSquares: original ? (original.selectedSquares || []) : [],
-    trainedNoObject: original ? !!original.noObject : null,
-    gridRows: original ? (original.gridRows||3) : 3,
-    gridCols: original ? (original.gridCols||3) : 3,
-    isTrained: !!original,
-    matchType: trained[imageKey] ? 'exact' : (original ? 'by-object' : 'none'),
     clientName: client.name || '?',
     clientEmail: client.email || '',
     createdAt: new Date().toISOString(),
@@ -305,34 +288,32 @@ app.post('/api/complaint', (req, res) => {
 app.get('/admin/complaints', (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
   const trained = getTrained();
-  // Build quick lookups by taskNumber and objectName
-  const byNum = {}, byObj = {};
-  for (const t of Object.values(trained)) {
-    if (t.taskNumber != null) byNum[t.taskNumber] = t;
-    if (t.objectName) byObj[t.objectName] = t;   // last one wins (most recent-ish)
-  }
+  const squareKB = getSquareKB();
 
   const list = Object.values(getComplaints())
     .sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt))
     .map(c => {
-      // Re-resolve training FRESH on every load (so it reflects current DB,
-      // independent of whether the dashboard's trained tab is loaded).
-      let t = trained[c.imageKey] || null;
-      if (!t && c.taskNumber != null) t = byNum[c.taskNumber] || null;
-      if (!t && c.objectName) t = byObj[c.objectName] || null;
+      // ONLY match by exact image fingerprint (imageKey). Matching by task
+      // number or object name is WRONG — it picks a *different* task that
+      // happens to share the number/name, showing misleading training.
+      const t = trained[c.imageKey] || null;
       if (t) {
+        // This exact image was trained as a full task — show that training.
         return {
           ...c,
           isTrained: true,
+          solveType: 'full',
           trainedSquares: t.selectedSquares || [],
           trainedNoObject: !!t.noObject,
           gridRows: t.gridRows || c.gridRows || 3,
           gridCols: t.gridCols || c.gridCols || 3,
-          taskNumber: c.taskNumber || t.taskNumber,
+          taskNumber: t.taskNumber,
           imageSrc: c.imageSrc || t.imageSrc || ''
         };
       }
-      return { ...c, isTrained: false };
+      // Not a full-image trained task → it was solved by PER-SQUARE matching.
+      // There is no single "training" to show; flag it clearly.
+      return { ...c, isTrained: false, solveType: 'per-square' };
     });
 
   res.json({ list, count: list.length });
