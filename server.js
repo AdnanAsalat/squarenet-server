@@ -134,7 +134,8 @@ function buildKBCache() {
       selectedSquares: val.selectedSquares,
       gridRows: val.gridRows,
       gridCols: val.gridCols,
-      taskNumber: val.taskNumber
+      taskNumber: val.taskNumber,
+      cellHashes: val.cellHashes || null
     };
   }
   _lightKBCache = lightKB;
@@ -336,6 +337,31 @@ app.post('/admin/complaints/clear', (req, res) => {
 
 // ── COMPLAINTS END ──────────────────────────────────────────
 
+// Backfill cellHashes for an existing trained task (sent from the dashboard,
+// which computes the hashes in-browser from the stored image). Used to make
+// old tasks (trained before strict verification) fully verifiable.
+app.post('/admin/backfill-cells', (req, res) => {
+  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
+  const { imageKey, cellHashes } = req.body;
+  if (!imageKey || !Array.isArray(cellHashes)) return res.status(400).json({ error: 'Missing data' });
+  const kb = getKB(); const trained = getTrained();
+  let changed = false;
+  if (kb[imageKey])     { kb[imageKey].cellHashes = cellHashes; changed = true; }
+  if (trained[imageKey]){ trained[imageKey].cellHashes = cellHashes; changed = true; }
+  if (changed) { saveKB(kb); saveTrained(trained); }
+  res.json({ ok: true, changed });
+});
+
+// List trained tasks that still need cellHashes (have an image but no hashes yet)
+app.get('/admin/needs-cells', (req, res) => {
+  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
+  const trained = getTrained();
+  const list = Object.values(trained)
+    .filter(t => t.imageSrc && !t.noObject && (!t.cellHashes || !t.cellHashes.length))
+    .map(t => ({ imageKey: t.imageKey, imageSrc: t.imageSrc, gridRows: t.gridRows||3, gridCols: t.gridCols||3 }));
+  res.json({ list, count: list.length });
+});
+
 app.post('/admin/renumber', (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
   const kb = getKB();
@@ -391,9 +417,20 @@ app.post('/admin/train', (req, res) => {
     taskNumber = maxNum + 1;
   }
 
+  // Build an ordered array of every cell's hash (index 0..n) for strict
+  // cell-by-cell verification by the extension. This lets the client confirm
+  // the exact same image (every square in place) before solving.
+  let cellHashes = null;
+  if (squarePHashes && Array.isArray(squarePHashes)) {
+    cellHashes = [];
+    for (const item of squarePHashes) {
+      if (item.index != null) cellHashes[item.index] = item.hash || '';
+    }
+  }
+
   kb[imageKey] = { objectName:objectName||'', imageSrc:imageSrc||'',
     noObject:noObject||false, selectedSquares:selectedSquares||[],
-    gridRows:gridRows||3, gridCols:gridCols||3,
+    gridRows:gridRows||3, gridCols:gridCols||3, cellHashes,
     taskNumber, trainedAt:new Date().toISOString() };
   saveKB(kb);
   if (squarePHashes && Array.isArray(squarePHashes)) {
@@ -407,7 +444,7 @@ app.post('/admin/train', (req, res) => {
   if (unsolved[imageKey]) { unsolved[imageKey].status='trained'; saveUnsolved(unsolved); }
   trained[imageKey] = { imageKey, imageSrc, objectName, taskText,
     selectedSquares:selectedSquares||[], noObject:noObject||false,
-    gridRows:gridRows||3, gridCols:gridCols||3,
+    gridRows:gridRows||3, gridCols:gridCols||3, cellHashes,
     taskNumber, trainedAt:new Date().toISOString() };
   saveTrained(trained);
   res.json({ ok: true, taskNumber });
