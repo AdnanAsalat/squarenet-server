@@ -362,6 +362,66 @@ app.get('/admin/needs-cells', (req, res) => {
   res.json({ list, count: list.length });
 });
 
+// Find groups of trained tasks that are the SAME image by content (cell hashes).
+// Returns groups so admin can review/clean duplicates created before content-matching.
+function cellsMatch(a, b) {
+  if (!a || !b || a.length !== b.length) return false;
+  let total = 0;
+  for (let i = 0; i < a.length; i++) {
+    if (!a[i] || !b[i] || a[i].length !== b[i].length) return false;
+    let d = 0; for (let j = 0; j < a[i].length; j++) if (a[i][j] !== b[i][j]) d++;
+    if (d > 2) return false;
+    total += d;
+  }
+  return total <= a.length;
+}
+
+app.get('/admin/duplicates', (req, res) => {
+  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
+  const trained = getTrained();
+  // Only tasks that have cell hashes (content) can be compared
+  const items = Object.values(trained).filter(t => t.cellHashes && t.cellHashes.length && !t.noObject);
+  const used = new Set();
+  const groups = [];
+  for (let i = 0; i < items.length; i++) {
+    if (used.has(items[i].imageKey)) continue;
+    const group = [items[i]];
+    for (let j = i+1; j < items.length; j++) {
+      if (used.has(items[j].imageKey)) continue;
+      if (items[i].objectName === items[j].objectName && cellsMatch(items[i].cellHashes, items[j].cellHashes)) {
+        group.push(items[j]);
+        used.add(items[j].imageKey);
+      }
+    }
+    if (group.length > 1) {
+      used.add(items[i].imageKey);
+      // keep the oldest (lowest taskNumber) as the "keeper"
+      group.sort((a,b)=>(a.taskNumber||0)-(b.taskNumber||0));
+      groups.push(group.map(g => ({
+        imageKey:g.imageKey, taskNumber:g.taskNumber, objectName:g.objectName, imageSrc:g.imageSrc
+      })));
+    }
+  }
+  const dupCount = groups.reduce((s,g)=>s+(g.length-1),0);
+  res.json({ groups, groupCount: groups.length, duplicateCount: dupCount });
+});
+
+// Delete a list of duplicate imageKeys (admin confirms which to remove)
+app.post('/admin/delete-duplicates', (req, res) => {
+  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
+  const { imageKeys } = req.body;
+  if (!Array.isArray(imageKeys)) return res.status(400).json({ error: 'Missing imageKeys' });
+  const kb = getKB(); const trained = getTrained(); const sqKB = getSquareKB();
+  let removed = 0;
+  for (const k of imageKeys) {
+    if (trained[k] || kb[k]) {
+      delete trained[k]; delete kb[k]; removed++;
+    }
+  }
+  saveKB(kb); saveTrained(trained);
+  res.json({ ok: true, removed });
+});
+
 app.post('/admin/renumber', (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
   const kb = getKB();
