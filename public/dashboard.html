@@ -180,6 +180,7 @@ input:focus{border-color:var(--accent)}
         <div class="spacer"></div>
         <button class="btn btn-amber btn-sm" onclick="renumberTasks()">🔢 Fix Numbers</button>
         <button class="btn btn-green btn-sm" onclick="backfillCells()">🔒 Secure All Tasks</button>
+        <button class="btn btn-amber btn-sm" onclick="findDuplicates()">👯 Find Duplicates</button>
         <button class="btn btn-ghost btn-sm" onclick="loadTrained(true)">🔄 Refresh</button>
       </div>
       <div class="grid-scroll">
@@ -519,6 +520,36 @@ function buildCellHashesOnly(src,rows,cols){
     img.onerror=()=>resolve(null);
     img.src=src;
   });
+}
+
+// Find duplicate trained tasks (same image by content) and offer to clean them.
+async function findDuplicates(){
+  toast('Scanning for duplicates...','inf');
+  let data;
+  try{ data=await api('GET','/admin/duplicates'); }
+  catch(e){ toast('Error scanning','err'); return; }
+
+  const groups=data.groups||[];
+  if(!groups.length){ toast('✅ No duplicates found!','ok'); return; }
+
+  // Collect the imageKeys to remove (keep the FIRST/oldest in each group)
+  const toDelete=[];
+  groups.forEach(g=>{ for(let i=1;i<g.length;i++) toDelete.push(g[i].imageKey); });
+
+  const msg=`Found ${data.groupCount} duplicate groups (${data.duplicateCount} extra copies).\n\n`
+    +`This will KEEP the oldest task in each group and DELETE the ${data.duplicateCount} extra copies.\n\n`
+    +`The kept task still solves these images (content matching). Proceed?`;
+  if(!confirm(msg)) { toast('Cancelled — nothing deleted','inf'); return; }
+
+  try{
+    const r=await api('POST','/admin/delete-duplicates',{ imageKeys: toDelete });
+    if(r.ok){
+      toast(`✅ Removed ${r.removed} duplicates!`,'ok');
+      window._trainedLoaded=false;
+      loadTrained(true);
+      loadStats();
+    } else { toast('Error: '+(r.error||'?'),'err'); }
+  }catch(e){ toast('Error: '+e.message,'err'); }
 }
 
 async function renumberTasks(){
