@@ -246,7 +246,19 @@ app.post('/api/complaint', (req, res) => {
 
   const complaints = getComplaints();
   const trained = getTrained();
-  const original = trained[imageKey] || null;   // the training that produced this solve
+
+  // Find the training that produced this solve:
+  // 1) Exact full-image match (imageKey), OR
+  // 2) Same task number, OR
+  // 3) Same object name (covers per-square-matched solves whose full-image
+  //    fingerprint isn't stored as a full task).
+  let original = trained[imageKey] || null;
+  if (!original && taskNumber) {
+    original = Object.values(trained).find(t => t.taskNumber === taskNumber) || null;
+  }
+  if (!original && objectName) {
+    original = Object.values(trained).find(t => t.objectName === objectName) || null;
+  }
 
   const id = uuidv4();
   complaints[id] = {
@@ -255,15 +267,14 @@ app.post('/api/complaint', (req, res) => {
     objectName: objectName || (original && original.objectName) || '?',
     taskNumber: taskNumber || (original && original.taskNumber) || null,
     imageSrc: imageSrc || (original && original.imageSrc) || '',
-    // How the extension actually solved it (what client saw)
     solvedSquares: solvedSquares || [],
     noObjectSolved: !!noObjectSolved,
-    // The stored training at time of complaint (for comparison)
     trainedSquares: original ? (original.selectedSquares || []) : [],
     trainedNoObject: original ? !!original.noObject : null,
     gridRows: original ? (original.gridRows||3) : 3,
     gridCols: original ? (original.gridCols||3) : 3,
     isTrained: !!original,
+    matchType: trained[imageKey] ? 'exact' : (original ? 'by-object' : 'none'),
     clientName: client.name || '?',
     clientEmail: client.email || '',
     createdAt: new Date().toISOString(),
