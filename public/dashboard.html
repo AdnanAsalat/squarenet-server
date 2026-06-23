@@ -278,6 +278,15 @@ async function tdbSet(key,val){
     });
   }catch(e){ return false; }
 }
+async function tdbDel(key){
+  try{
+    const db=await tdbOpen();
+    return await new Promise((resolve)=>{
+      const tx=db.transaction(TDB_STORE,'readwrite').objectStore(TDB_STORE).delete(key);
+      tx.onsuccess=()=>resolve(true); tx.onerror=()=>resolve(false);
+    });
+  }catch(e){ return false; }
+}
 let modalEntry=null, selectedCells=new Set(), taskCounter=0;
 
 // ── LOGIN ──────────────────────────────────────────────────────
@@ -427,7 +436,7 @@ async function loadTrained(force){
     // 2) If not forcing, try the IndexedDB cache and compare versions
     if(!force && serverVer!=null){
       const cached=await tdbGet('trained');
-      if(cached && cached.version===serverVer && Array.isArray(cached.list)){
+      if(cached && cached.version===serverVer && Array.isArray(cached.list) && cached.list.length){
         trainedData=cached.list;
         window._trainedTotal=cached.list.length;
         window._trainedLoaded=true;
@@ -436,14 +445,20 @@ async function loadTrained(force){
       }
     }
 
-    // 3) Version changed (or no cache / forced) → download fresh and cache it
+    // Forcing (or no/empty cache) → wipe any stale cache first
+    if(force) await tdbDel('trained');
+
+    // 3) Download fresh from server
     const d=await api('GET','/admin/trained');
     trainedData=d.list||[];
     window._trainedTotal=d.total||d.count||0;
     window._trainedLoaded=true;
     renderTrained();
-    // Save to IndexedDB for next time
-    tdbSet('trained',{ version: (d.version!=null?d.version:serverVer), list: trainedData });
+
+    // Only cache if we actually got the full set (avoid caching a partial/empty list)
+    if(trainedData.length){
+      tdbSet('trained',{ version: (d.version!=null?d.version:serverVer), list: trainedData });
+    }
   }catch(e){}
 }
 
