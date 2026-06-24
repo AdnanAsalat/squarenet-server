@@ -456,6 +456,32 @@ app.get('/admin/kb-keys', (req, res) => {
   res.json({ kb: out, count: Object.keys(out).length });
 });
 
+// Migrate all KB/trained keys to a new fingerprint (first 350 chars of base64).
+// Rebuilds keys from each stored image so old tasks match the new extension.
+app.post('/admin/migrate-keys', (req, res) => {
+  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
+  const newFp = (src) => (src && src.length >= 200) ? src.substring(0, 350) : null;
+
+  const kb = getKB(); const trained = getTrained();
+  const newKB = {}, newTrained = {};
+  let kbDone = 0, trDone = 0, skipped = 0;
+
+  for (const val of Object.values(kb)) {
+    const nk = newFp(val.imageSrc);
+    if (!nk) { skipped++; continue; }
+    val.imageKey = nk;
+    newKB[nk] = val; kbDone++;
+  }
+  for (const val of Object.values(trained)) {
+    const nk = newFp(val.imageSrc);
+    if (!nk) { skipped++; continue; }
+    val.imageKey = nk;
+    newTrained[nk] = val; trDone++;
+  }
+  saveKB(newKB); saveTrained(newTrained);
+  res.json({ ok: true, kbKeys: kbDone, trainedKeys: trDone, skipped });
+});
+
 app.post('/admin/renumber', (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
   const kb = getKB();
