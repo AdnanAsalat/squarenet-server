@@ -431,16 +431,14 @@ app.post('/admin/delete-duplicates', (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
   const { imageKeys } = req.body;
   if (!Array.isArray(imageKeys)) return res.status(400).json({ error: 'Missing imageKeys' });
-  const kb = getKB(); const trained = getTrained(); const unsolved = getUnsolved();
+  // SAFETY: only delete from UNSOLVED. Trained tasks are never touched here,
+  // so trained data can never be lost from the duplicates tab.
+  const unsolved = getUnsolved();
   let removed = 0;
   for (const k of imageKeys) {
-    let hit = false;
-    if (trained[k]) { delete trained[k]; hit = true; }
-    if (kb[k]) { delete kb[k]; hit = true; }
-    if (unsolved[k]) { delete unsolved[k]; hit = true; }
-    if (hit) removed++;
+    if (unsolved[k]) { delete unsolved[k]; removed++; }
   }
-  saveKB(kb); saveTrained(trained); saveUnsolved(unsolved);
+  saveUnsolved(unsolved);
   res.json({ ok: true, removed });
 });
 
