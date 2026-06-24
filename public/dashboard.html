@@ -895,8 +895,9 @@ async function saveTrain(noObject){
         if(t){ t.taskNumber=d.taskNumber; if(window._trainedLoaded) renderTrained(); }
       }
       loadStats();
-      // Refresh local cache to the new server version (so next open is correct & instant)
-      refreshTrainedCache();
+      // Update local cache directly using the version from the train response
+      // (no extra server round-trip — faster training).
+      if(d.version!=null){ tdbSet('trained',{ version:d.version, list:trainedData }); }
     } else {
       window._recentlyTrained.delete(entry.imageKey);  // allow it back
       trainedData = trainedData.filter(e=>e.imageKey!==entry.imageKey);
