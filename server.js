@@ -444,6 +444,18 @@ app.post('/admin/delete-duplicates', (req, res) => {
   res.json({ ok: true, removed });
 });
 
+// Debug: return KB as key -> objectName (NO images) for the console inspector.
+// Admin-only. Lightweight so it can be fetched from the task page.
+app.get('/admin/kb-keys', (req, res) => {
+  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
+  const kb = getKB();
+  const out = {};
+  for (const [key, val] of Object.entries(kb)) {
+    out[key] = { objectName: val.objectName || '', noObject: !!val.noObject };
+  }
+  res.json({ kb: out, count: Object.keys(out).length });
+});
+
 app.post('/admin/renumber', (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
   const kb = getKB();
