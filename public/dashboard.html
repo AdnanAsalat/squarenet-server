@@ -216,7 +216,10 @@ input:focus{border-color:var(--accent)}
     <!-- DUPLICATES -->
     <div class="pane" id="pane-duplicates">
       <div class="toolbar">
-        <span style="color:var(--muted);font-size:13px">Same image trained/submitted more than once</span>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer">
+          <input type="checkbox" id="dup-select-all" onchange="toggleDupSelectAll()"> Select all
+        </label>
+        <button class="btn btn-danger btn-sm" id="dup-del-btn" style="display:none" onclick="deleteSelectedDups()">🗑 Delete Selected</button>
         <div class="spacer"></div>
         <span id="dup-count" style="font-size:12px;color:var(--muted);margin-right:10px"></span>
         <button class="btn btn-ghost btn-sm" onclick="loadDuplicates()">🔄 Scan</button>
@@ -316,9 +319,11 @@ function initApp(){
     if(t.dataset.tab==='duplicates') loadDuplicates();
   }));
   loadStats(); loadUnsolved();
-  // Auto-refresh ONLY the unsolved tab (new tasks arrive there).
-  // Trained tab loads once and is NOT auto-refreshed (it only changes when admin trains/deletes).
+  // Auto-refresh ONLY the unsolved tab. Skip while the train modal is open so
+  // training stays smooth (no list reload / image re-fetch mid-train).
   setInterval(()=>{
+    const modalOpen = document.getElementById('modal').classList.contains('open');
+    if(modalOpen) return;   // training in progress — don't interrupt
     loadStats();
     const activeTab = document.querySelector('.tab.active')?.dataset.tab;
     if(activeTab==='unsolved') loadUnsolved();
@@ -493,9 +498,11 @@ async function loadDuplicates(){
         <img src="${t.imageSrc||''}" style="width:130px;height:130px;object-fit:cover;border-radius:6px" loading="lazy">
         <div style="font-size:11px;color:#c4b5fd;margin-top:4px">#${t.taskNumber||'?'} ${t.objectName||''}</div>
         <div style="font-size:9px;color:var(--muted)">${t.source}${ti===0?' • KEEP':''}</div>
-        ${ti===0
-          ? '<div style="font-size:10px;color:#22c55e;margin-top:4px">✅ Keeper</div>'
-          : `<button class="btn btn-danger btn-sm" style="margin-top:6px;width:100%" onclick="deleteDupOne('${t.imageKey}',${gi})">🗑 Delete</button>`}
+        ${t.source==='unsolved'
+          ? `<label style="display:flex;align-items:center;justify-content:center;gap:5px;margin-top:6px;font-size:11px;color:#fca5a5;cursor:pointer">
+               <input type="checkbox" class="dup-check" value="${t.imageKey}" onchange="updateDupSelCount()"> Select
+             </label>`
+          : '<div style="font-size:10px;color:#22c55e;margin-top:6px">✅ Trained (safe)</div>'}
       </div>`).join('');
     return `
       <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:12px">
@@ -503,21 +510,39 @@ async function loadDuplicates(){
         <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-start">${cards}</div>
       </div>`;
   }).join('');
+  updateDupSelCount();
 }
 
-async function deleteDupOne(imageKey,groupIndex){
-  if(!confirm('Delete this duplicate copy?')) return;
+// How many duplicate copies are currently checked
+function updateDupSelCount(){
+  const n=document.querySelectorAll('.dup-check:checked').length;
+  const btn=document.getElementById('dup-del-btn');
+  if(btn){ btn.style.display = n ? 'inline-flex' : 'none'; btn.textContent = '🗑 Delete Selected ('+n+')'; }
+  // select-all checkbox state
+  const all=document.querySelectorAll('.dup-check').length;
+  const sa=document.getElementById('dup-select-all');
+  if(sa){ sa.checked = (all>0 && n===all); }
+}
+
+// Tick/untick every duplicate copy
+function toggleDupSelectAll(){
+  const on=document.getElementById('dup-select-all').checked;
+  document.querySelectorAll('.dup-check').forEach(c=>{ c.checked=on; });
+  updateDupSelCount();
+}
+
+// Delete all checked duplicate copies in one go
+async function deleteSelectedDups(){
+  const keys=Array.from(document.querySelectorAll('.dup-check:checked')).map(c=>c.value);
+  if(!keys.length){ toast('Pehle select karo','err'); return; }
+  if(!confirm('Delete '+keys.length+' selected duplicate copies?\n\nYeh sirf duplicate copies hatayega (keeper safe rahega).')) return;
+  toast('Deleting '+keys.length+'...','inf');
   try{
-    const r=await api('POST','/admin/delete-duplicates',{ imageKeys:[imageKey] });
+    const r=await api('POST','/admin/delete-duplicates',{ imageKeys: keys });
     if(r.ok){
-      toast('🗑 Deleted','ok');
-      // Remove from local group display
-      if(window._dupGroups && window._dupGroups[groupIndex]){
-        window._dupGroups[groupIndex]=window._dupGroups[groupIndex].filter(t=>t.imageKey!==imageKey);
-      }
+      toast('🗑 Removed '+r.removed+' duplicates','ok');
       loadStats();
-      window._trainedLoaded=false;   // trained list will refresh on next open
-      loadDuplicates();              // re-scan to refresh view
+      loadDuplicates();   // re-scan
     } else { toast('Error: '+(r.error||'?'),'err'); }
   }catch(e){ toast('Error: '+e.message,'err'); }
 }
