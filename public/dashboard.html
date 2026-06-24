@@ -264,43 +264,6 @@ const SERVER = location.origin; // same origin since dashboard is served from se
 let PASS = '';
 let unsolvedData=[], trainedData=[], clientsData={};
 
-// ── IndexedDB cache for trained data (persists across browser close/reload) ──
-const TDB_NAME='aacaptcha_trained', TDB_STORE='kv';
-function tdbOpen(){
-  return new Promise((resolve,reject)=>{
-    const r=indexedDB.open(TDB_NAME,1);
-    r.onupgradeneeded=()=>{ r.result.createObjectStore(TDB_STORE); };
-    r.onsuccess=()=>resolve(r.result);
-    r.onerror=()=>reject(r.error);
-  });
-}
-async function tdbGet(key){
-  try{
-    const db=await tdbOpen();
-    return await new Promise((resolve)=>{
-      const tx=db.transaction(TDB_STORE,'readonly').objectStore(TDB_STORE).get(key);
-      tx.onsuccess=()=>resolve(tx.result); tx.onerror=()=>resolve(null);
-    });
-  }catch(e){ return null; }
-}
-async function tdbSet(key,val){
-  try{
-    const db=await tdbOpen();
-    return await new Promise((resolve)=>{
-      const tx=db.transaction(TDB_STORE,'readwrite').objectStore(TDB_STORE).put(val,key);
-      tx.onsuccess=()=>resolve(true); tx.onerror=()=>resolve(false);
-    });
-  }catch(e){ return false; }
-}
-async function tdbDel(key){
-  try{
-    const db=await tdbOpen();
-    return await new Promise((resolve)=>{
-      const tx=db.transaction(TDB_STORE,'readwrite').objectStore(TDB_STORE).delete(key);
-      tx.onsuccess=()=>resolve(true); tx.onerror=()=>resolve(false);
-    });
-  }catch(e){ return false; }
-}
 let modalEntry=null, selectedCells=new Set(), taskCounter=0;
 
 // ── LOGIN ──────────────────────────────────────────────────────
@@ -347,7 +310,7 @@ function initApp(){
     t.classList.add('active');
     document.getElementById('pane-'+t.dataset.tab).classList.add('active');
     // Trained loads ONCE — only first time the tab is opened. After that it's cached.
-    if(t.dataset.tab==='trained' && !window._trainedLoaded) loadTrained();
+    if(t.dataset.tab==='trained') loadTrained();
     if(t.dataset.tab==='clients') loadClients();
     if(t.dataset.tab==='complaints') loadComplaints();
     if(t.dataset.tab==='duplicates') loadDuplicates();
@@ -433,47 +396,16 @@ function renderUnsolved(){
 }
 
 // ── TRAINED ─────────────────────────────────────────────────────
-// Save current trainedData to IndexedDB tagged with the server's latest version,
-// so reopening the browser loads instantly from cache without a big download.
-async function refreshTrainedCache(){
-  try{
-    const v=await api('GET','/admin/trained-version');
-    tdbSet('trained',{ version: v.version, list: trainedData });
-  }catch(e){}
-}
 
 async function loadTrained(force){
   try{
-    // 1) Check the server's trained version (tiny, fast request)
-    let serverVer = null;
-    try{ const v=await api('GET','/admin/trained-version'); serverVer=v.version; }catch(e){}
-
-    // 2) If not forcing, try the IndexedDB cache and compare versions
-    if(!force && serverVer!=null){
-      const cached=await tdbGet('trained');
-      if(cached && cached.version===serverVer && Array.isArray(cached.list) && cached.list.length){
-        trainedData=cached.list;
-        window._trainedTotal=cached.list.length;
-        window._trainedLoaded=true;
-        renderTrained();
-        return;   // ✅ loaded from local cache — no big download
-      }
-    }
-
-    // Forcing (or no/empty cache) → wipe any stale cache first
-    if(force) await tdbDel('trained');
-
-    // 3) Download fresh from server
+    // Always load fresh from the server. No local caching — caching previously
+    // caused stale/partial data, so we keep it simple and safe.
     const d=await api('GET','/admin/trained');
     trainedData=d.list||[];
     window._trainedTotal=d.total||d.count||0;
     window._trainedLoaded=true;
     renderTrained();
-
-    // Only cache if we actually got the full set (avoid caching a partial/empty list)
-    if(trainedData.length){
-      tdbSet('trained',{ version: (d.version!=null?d.version:serverVer), list: trainedData });
-    }
   }catch(e){}
 }
 
@@ -895,9 +827,6 @@ async function saveTrain(noObject){
         if(t){ t.taskNumber=d.taskNumber; if(window._trainedLoaded) renderTrained(); }
       }
       loadStats();
-      // Update local cache directly using the version from the train response
-      // (no extra server round-trip — faster training).
-      if(d.version!=null){ tdbSet('trained',{ version:d.version, list:trainedData }); }
     } else {
       window._recentlyTrained.delete(entry.imageKey);  // allow it back
       trainedData = trainedData.filter(e=>e.imageKey!==entry.imageKey);
@@ -922,7 +851,7 @@ async function deleteTrained(){
   toast('🗑 Deleted','ok');
   try{
     const d=await api('DELETE','/admin/trained/'+encodeURIComponent(entry.imageKey));
-    if(d.ok){ loadStats(); refreshTrainedCache(); }
+    if(d.ok){ loadStats(); }
     else { toast('Delete failed: '+(d.error||'?'),'err'); loadTrained(true); }
   }catch(e){ toast('Delete error: '+e.message,'err'); loadTrained(true); }
 }
