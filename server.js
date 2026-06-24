@@ -515,13 +515,9 @@ app.post('/admin/train', (req, res) => {
     gridRows:gridRows||3, gridCols:gridCols||3, cellHashes,
     taskNumber, trainedAt:new Date().toISOString() };
   saveKB(kb);
-  if (squarePHashes && Array.isArray(squarePHashes)) {
-    const sqKB = getSquareKB();
-    for (const item of squarePHashes) {
-      if (item.hash) sqKB[item.hash] = item.isObject ? { name:objectName, num:taskNumber } : '__none__';
-    }
-    saveSquareKB(sqKB);
-  }
+  // NOTE: squareKB (per-square pHash guessing) is no longer used for matching,
+  // so we skip building/writing it here — this makes training noticeably faster
+  // (one less large file written per train).
   const unsolved = getUnsolved();
   if (unsolved[imageKey]) { unsolved[imageKey].status='trained'; saveUnsolved(unsolved); }
   trained[imageKey] = { imageKey, imageSrc, objectName, taskText,
@@ -529,7 +525,7 @@ app.post('/admin/train', (req, res) => {
     gridRows:gridRows||3, gridCols:gridCols||3, cellHashes,
     taskNumber, trainedAt:new Date().toISOString() };
   saveTrained(trained);
-  res.json({ ok: true, taskNumber });
+  res.json({ ok: true, taskNumber, version: getTrainedVersion() });
 });
 
 app.delete('/admin/trained/:key', (req, res) => {
