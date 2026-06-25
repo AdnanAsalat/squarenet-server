@@ -178,6 +178,7 @@ input:focus{border-color:var(--accent)}
     <div class="pane" id="pane-trained">
       <div class="toolbar">
         <input class="search" id="search-trained" placeholder="🔍 Search..." oninput="renderTrained()">
+        <button class="btn btn-sm" id="solving-toggle" onclick="toggleSolving()" style="background:#22c55e;color:#fff">⏳ Solving: ...</button>
         <div class="spacer"></div>
         <button class="btn btn-amber btn-sm" onclick="renumberTasks()">🔢 Fix Numbers</button>
         <button class="btn btn-green btn-sm" onclick="backfillCells()">🔒 Secure All Tasks</button>
@@ -318,7 +319,7 @@ function initApp(){
     if(t.dataset.tab==='complaints') loadComplaints();
     if(t.dataset.tab==='duplicates') loadDuplicates();
   }));
-  loadStats(); loadUnsolved();
+  loadStats(); loadUnsolved(); loadSolvingStatus();
   // Auto-refresh ONLY the unsolved tab. Skip while the train modal is open so
   // training stays smooth (no list reload / image re-fetch mid-train).
   setInterval(()=>{
@@ -498,11 +499,11 @@ async function loadDuplicates(){
         <img src="${t.imageSrc||''}" style="width:130px;height:130px;object-fit:cover;border-radius:6px" loading="lazy">
         <div style="font-size:11px;color:#c4b5fd;margin-top:4px">#${t.taskNumber||'?'} ${t.objectName||''}</div>
         <div style="font-size:9px;color:var(--muted)">${t.source}${ti===0?' • KEEP':''}</div>
-        ${t.source==='unsolved'
-          ? `<label style="display:flex;align-items:center;justify-content:center;gap:5px;margin-top:6px;font-size:11px;color:#fca5a5;cursor:pointer">
-               <input type="checkbox" class="dup-check" value="${t.imageKey}" onchange="updateDupSelCount()"> Select
-             </label>`
-          : '<div style="font-size:10px;color:#22c55e;margin-top:6px">✅ Trained (safe)</div>'}
+        ${ti===0
+          ? '<div style="font-size:10px;color:#22c55e;margin-top:6px">✅ Keeper (safe)</div>'
+          : `<label style="display:flex;align-items:center;justify-content:center;gap:5px;margin-top:6px;font-size:11px;color:#fca5a5;cursor:pointer">
+               <input type="checkbox" class="dup-check" value="${t.imageKey}" data-source="${t.source}" onchange="updateDupSelCount()"> Select
+             </label>`}
       </div>`).join('');
     return `
       <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:12px">
@@ -560,6 +561,31 @@ async function renumberTasks(){
     } else {
       toast('Error: '+(d.error||'?'),'err');
     }
+  }catch(e){ toast('Error: '+e.message,'err'); }
+}
+
+// ── GLOBAL SOLVING ON/OFF ───────────────────────────────────
+function applySolvingBtn(on){
+  const b=document.getElementById('solving-toggle');
+  if(!b) return;
+  if(on){ b.style.background='#22c55e'; b.style.color='#fff'; b.textContent='✅ Solving: ON'; }
+  else  { b.style.background='#ef4444'; b.style.color='#fff'; b.textContent='⛔ Solving: OFF'; }
+}
+async function loadSolvingStatus(){
+  try{ const d=await api('GET','/admin/solving'); applySolvingBtn(d.solvingEnabled!==false); }catch(e){}
+}
+async function toggleSolving(){
+  // read current from button text
+  const b=document.getElementById('solving-toggle');
+  const currentlyOn = b && b.textContent.includes('ON');
+  const next = !currentlyOn;
+  if(!confirm(next
+      ? 'Turn solving ON?\n\nSaari extensions trained tasks solve karna shuru kar dengi.'
+      : 'Turn solving OFF?\n\nKoi bhi extension koi task solve NAHI karegi (training chalti rahegi). Tab tak band rahega jab tak wapas ON na karo.')) return;
+  try{
+    const d=await api('POST','/admin/solving',{ solvingEnabled: next });
+    applySolvingBtn(d.solvingEnabled!==false);
+    toast(d.solvingEnabled!==false ? '✅ Solving ON' : '⛔ Solving OFF','ok');
   }catch(e){ toast('Error: '+e.message,'err'); }
 }
 
