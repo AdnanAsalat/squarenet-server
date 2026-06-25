@@ -142,6 +142,16 @@ function buildKBCache() {
   _squareKBCache = getSquareKB();
 }
 
+// Global solving switch (ON by default). When OFF, extensions stop solving for
+// everyone (training still works). Stored in a tiny file so it survives restarts.
+function getSolvingEnabled() {
+  try { return JSON.parse(fs.readFileSync(path.join(DATA_DIR,'settings.json'),'utf8')).solvingEnabled !== false; }
+  catch(e) { return true; }
+}
+function setSolvingEnabled(on) {
+  try { fs.writeFileSync(path.join(DATA_DIR,'settings.json'), JSON.stringify({ solvingEnabled: !!on }), 'utf8'); } catch(e){}
+}
+
 app.get('/api/kb', (req, res) => {
   const apiKey = req.headers['x-api-key'] || req.query.apikey;
   const client = getClientInfo(apiKey);
@@ -164,7 +174,23 @@ app.get('/api/kb', (req, res) => {
   // Use cached light KB (rebuilt only when training changes) — much faster,
   // avoids re-reading and stripping the large kb.json on every client request.
   if (!_lightKBCache || !_squareKBCache) buildKBCache();
-  res.json({ kb: _lightKBCache, squareKB: _squareKBCache, updatedAt: new Date().toISOString() });
+  res.json({
+    kb: _lightKBCache,
+    squareKB: _squareKBCache,
+    solvingEnabled: getSolvingEnabled(),   // global ON/OFF for all extensions
+    updatedAt: new Date().toISOString()
+  });
+});
+
+// Admin: read/set the global solving switch
+app.get('/admin/solving', (req, res) => {
+  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
+  res.json({ solvingEnabled: getSolvingEnabled() });
+});
+app.post('/admin/solving', (req, res) => {
+  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
+  setSolvingEnabled(!!req.body.solvingEnabled);
+  res.json({ ok: true, solvingEnabled: getSolvingEnabled() });
 });
 
 app.post('/api/unsolved', (req, res) => {
@@ -431,14 +457,19 @@ app.post('/admin/delete-duplicates', (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
   const { imageKeys } = req.body;
   if (!Array.isArray(imageKeys)) return res.status(400).json({ error: 'Missing imageKeys' });
-  // SAFETY: only delete from UNSOLVED. Trained tasks are never touched here,
-  // so trained data can never be lost from the duplicates tab.
-  const unsolved = getUnsolved();
+  // Delete the selected duplicate copies from trained/kb and/or unsolved.
+  // The "keeper" (oldest copy in each group) is never selectable in the UI,
+  // so it can never be sent here — at least one copy always survives.
+  const kb = getKB(); const trained = getTrained(); const unsolved = getUnsolved();
   let removed = 0;
   for (const k of imageKeys) {
-    if (unsolved[k]) { delete unsolved[k]; removed++; }
+    let hit = false;
+    if (trained[k]) { delete trained[k]; hit = true; }
+    if (kb[k]) { delete kb[k]; hit = true; }
+    if (unsolved[k]) { delete unsolved[k]; hit = true; }
+    if (hit) removed++;
   }
-  saveUnsolved(unsolved);
+  saveKB(kb); saveTrained(trained); saveUnsolved(unsolved);
   res.json({ ok: true, removed });
 });
 
