@@ -128,8 +128,6 @@ function buildKBCache() {
   const kb = getKB();
   const lightKB = {};
   for (const [key, val] of Object.entries(kb)) {
-    // Build the content key (pixel-hash fingerprint) from stored cell hashes so
-    // the extension can match the same image even when its base64 differs.
     let contentKey = null;
     if (Array.isArray(val.cellHashes) && val.cellHashes.length && val.cellHashes.every(h => h)) {
       contentKey = val.cellHashes.join('-');
@@ -287,8 +285,13 @@ app.get('/admin/trained-version', (req, res) => {
 app.get('/admin/trained', (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
   const trained = getTrained();
-  const list = Object.values(trained).sort((a,b)=>new Date(b.trainedAt)-new Date(a.trainedAt));
-  res.json({ list, count: list.length, total: list.length, version: getTrainedVersion() });
+  const all = Object.values(trained).sort((a,b)=>new Date(b.trainedAt)-new Date(a.trainedAt));
+  // Pagination — sending all 800+ full base64 images at once is very slow,
+  // especially on a slow connection. Default to 60 per page.
+  const offset = parseInt(req.query.offset) || 0;
+  const limit = Math.min(parseInt(req.query.limit) || 60, 200);
+  const page = all.slice(offset, offset + limit);
+  res.json({ list: page, count: page.length, total: all.length, version: getTrainedVersion() });
 });
 
 // Fix duplicate/missing task numbers — renumber all trained tasks uniquely
