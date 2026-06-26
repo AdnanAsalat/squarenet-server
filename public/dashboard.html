@@ -504,7 +504,9 @@ async function loadDuplicates(){
   window._dupGroups=data.groups||[];
   const badge=document.getElementById('dup-badge');
   const cnt=document.getElementById('dup-count');
-  if(cnt) cnt.textContent = data.duplicateCount ? `${data.duplicateCount} extra copies in ${data.groupCount} groups` : '';
+  let txt = data.duplicateCount ? `${data.duplicateCount} extra copies in ${data.groupCount} groups` : '';
+  if(data.missingCells){ txt += (txt?'  •  ':'') + `⚠️ ${data.missingCells} tasks not scannable — press "Secure All Tasks" in Trained tab first`; }
+  if(cnt) cnt.textContent = txt;
   if(badge){ if(data.duplicateCount){badge.style.display='inline-block';badge.textContent=data.duplicateCount;}else{badge.style.display='none';} }
 
   if(!data.groups || !data.groups.length){
