@@ -509,6 +509,20 @@ app.get('/admin/kb-keys', (req, res) => {
 
 // Migrate all KB/trained keys to a new fingerprint (first 350 chars of base64).
 // Rebuilds keys from each stored image so old tasks match the new extension.
+// Cleanup: remove any unsolved entry whose imageKey is already trained.
+// Fixes the "trained task also stuck in unsolved → shows as duplicate" issue.
+app.post('/admin/cleanup-unsolved', (req, res) => {
+  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
+  const trained = getTrained();
+  const unsolved = getUnsolved();
+  let removed = 0;
+  for (const k of Object.keys(unsolved)) {
+    if (trained[k]) { delete unsolved[k]; removed++; }
+  }
+  if (removed) saveUnsolved(unsolved);
+  res.json({ ok: true, removed });
+});
+
 app.post('/admin/renumber', (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
   const kb = getKB();
@@ -601,7 +615,10 @@ app.post('/admin/train', (req, res) => {
   // so we skip building/writing it here — this makes training noticeably faster
   // (one less large file written per train).
   const unsolved = getUnsolved();
-  if (unsolved[imageKey]) { unsolved[imageKey].status='trained'; saveUnsolved(unsolved); }
+  // Remove the task from unsolved once trained. (Previously this only set
+  // status='trained' and left it in unsolved, so every freshly-trained task
+  // showed up as a duplicate of itself — trained copy + leftover unsolved copy.)
+  if (unsolved[imageKey]) { delete unsolved[imageKey]; saveUnsolved(unsolved); }
   trained[imageKey] = { imageKey, imageSrc, objectName, taskText,
     selectedSquares:selectedSquares||[], noObject:noObject||false,
     gridRows:gridRows||3, gridCols:gridCols||3, cellHashes,
