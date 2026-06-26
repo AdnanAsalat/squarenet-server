@@ -51,7 +51,7 @@ const saveClients  = d => { _statsCache=null; return writeJSON('clients.json', d
 const saveKB       = d => { invalidateKBCache(); _statsCache=null; return writeJSON('kb.json', d); };
 const saveSquareKB = d => { invalidateKBCache(); _statsCache=null; return writeJSON('square_kb.json', d); };
 const saveUnsolved = d => { _statsCache=null; return writeJSON('unsolved.json', d); };
-const saveTrained  = d => { _statsCache=null; bumpTrainedVersion(); return writeJSON('trained.json', d); };
+const saveTrained  = d => { invalidateKBCache(); _statsCache=null; bumpTrainedVersion(); return writeJSON('trained.json', d); };
 const saveUsage    = d => writeJSON('usage.json', d);
 const saveComplaints = d => { _statsCache=null; return writeJSON('complaints.json', d); };
 
