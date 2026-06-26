@@ -186,6 +186,9 @@ input:focus{border-color:var(--accent)}
       </div>
       <div class="grid-scroll">
         <div class="grid-list" id="trained-list"><div class="no-items">Loading...</div></div>
+        <div style="text-align:center;padding:14px">
+          <button class="btn btn-ghost" id="trained-more-btn" onclick="loadMoreTrained()" style="display:none">⬇ Load More</button>
+        </div>
       </div>
     </div>
 
@@ -405,14 +408,30 @@ function renderUnsolved(){
 
 async function loadTrained(force){
   try{
-    // Always load fresh from the server. No local caching — caching previously
-    // caused stale/partial data, so we keep it simple and safe.
-    const d=await api('GET','/admin/trained');
+    // Load first page only (fast). More load on demand via "Load More".
+    const d=await api('GET','/admin/trained?offset=0&limit=60');
     trainedData=d.list||[];
-    window._trainedTotal=d.total||d.count||0;
+    window._trainedTotal=d.total||0;
+    window._trainedOffset=trainedData.length;
     window._trainedLoaded=true;
     renderTrained();
+    updateTrainedMore();
   }catch(e){}
+}
+async function loadMoreTrained(){
+  try{
+    const offset=window._trainedOffset||0;
+    const d=await api('GET','/admin/trained?offset='+offset+'&limit=60');
+    trainedData=trainedData.concat(d.list||[]);
+    window._trainedOffset=trainedData.length;
+    renderTrained();
+    updateTrainedMore();
+  }catch(e){}
+}
+function updateTrainedMore(){
+  const total=window._trainedTotal||0, shown=trainedData.length;
+  let btn=document.getElementById('trained-more-btn');
+  if(btn) btn.style.display = (shown<total)?'inline-flex':'none';
 }
 
 // Compute & store per-cell hashes for ALL old tasks that don't have them yet,
