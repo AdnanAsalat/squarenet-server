@@ -338,12 +338,16 @@ app.get('/admin/complaints', (req, res) => {
   const list = Object.values(getComplaints())
     .sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt))
     .map(c => {
-      // ONLY match by exact image fingerprint (imageKey). Matching by task
-      // number or object name is WRONG — it picks a *different* task that
-      // happens to share the number/name, showing misleading training.
-      const t = trained[c.imageKey] || null;
+      // Match the complaint to its training. First try the exact imageKey.
+      // If that misses (KolotiBablo can serve the same image under a slightly
+      // different base64, so the client's imageKey may differ), fall back to the
+      // unique task number the client saw — task numbers are unique, so this
+      // reliably finds the same task without picking a wrong one.
+      let t = trained[c.imageKey] || null;
+      if (!t && c.taskNumber) {
+        t = Object.values(trained).find(x => x.taskNumber === c.taskNumber) || null;
+      }
       if (t) {
-        // This exact image was trained as a full task — show that training.
         return {
           ...c,
           isTrained: true,
@@ -356,8 +360,7 @@ app.get('/admin/complaints', (req, res) => {
           imageSrc: c.imageSrc || t.imageSrc || ''
         };
       }
-      // Not a full-image trained task → it was solved by PER-SQUARE matching.
-      // There is no single "training" to show; flag it clearly.
+      // No training found at all → flag it for manual training.
       return { ...c, isTrained: false, solveType: 'per-square' };
     });
 
@@ -569,6 +572,23 @@ app.post('/admin/train', (req, res) => {
     cellHashes = [];
     for (const item of squarePHashes) {
       if (item.index != null) cellHashes[item.index] = item.hash || '';
+    }
+  }
+
+  // DEDUPE BY CONTENT: KolotiBablo serves the same image with slightly different
+  // base64, so the same picture can arrive under a different imageKey. If an
+  // existing trained task has the SAME object name AND identical cell hashes,
+  // remove that old entry first and reuse its task number — so re-training the
+  // same picture UPDATES it instead of creating a duplicate.
+  if (cellHashes && cellHashes.length && cellHashes.every(h=>h)) {
+    for (const [oldKey, v] of Object.entries(trained)) {
+      if (oldKey === imageKey) continue;
+      if ((v.objectName||'') === (objectName||'') &&
+          Array.isArray(v.cellHashes) && cellsMatch(v.cellHashes, cellHashes)) {
+        if (v.taskNumber) taskNumber = v.taskNumber;  // keep its number
+        delete trained[oldKey];
+        if (kb[oldKey]) delete kb[oldKey];
+      }
     }
   }
 
