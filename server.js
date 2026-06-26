@@ -476,40 +476,12 @@ app.post('/admin/delete-duplicates', (req, res) => {
 
   const kb = getKB(); const trained = getTrained(); const unsolved = getUnsolved();
 
-  // SAFETY: For every duplicate group, always keep the OLDEST copy (lowest task
-  // number; unsolved counts as newest). We re-scan groups here and remove the
-  // keeper from the delete list, so a keeper can NEVER be deleted even if the
-  // UI sent it. This guarantees at least one copy of every image survives.
-  const keepers = new Set();
-  {
-    const items = [];
-    for (const t of Object.values(trained))
-      if (t.cellHashes && t.cellHashes.length && !t.noObject)
-        items.push({ imageKey:t.imageKey, taskNumber:t.taskNumber||999999, objectName:t.objectName||'?', cellHashes:t.cellHashes });
-    for (const u of Object.values(unsolved))
-      if (u.cellHashes && u.cellHashes.length)
-        items.push({ imageKey:u.imageKey, taskNumber:999999, objectName:u.objectName||'?', cellHashes:u.cellHashes });
-    const used = new Set();
-    for (let i=0;i<items.length;i++){
-      if (used.has(items[i].imageKey)) continue;
-      const group=[items[i]];
-      for (let j=i+1;j<items.length;j++){
-        if (used.has(items[j].imageKey)) continue;
-        if (items[i].objectName===items[j].objectName && cellsMatch(items[i].cellHashes, items[j].cellHashes)){
-          group.push(items[j]); used.add(items[j].imageKey);
-        }
-      }
-      if (group.length>1){
-        used.add(items[i].imageKey);
-        group.sort((a,b)=>a.taskNumber-b.taskNumber);
-        keepers.add(group[0].imageKey);   // oldest = keeper, protected
-      }
-    }
-  }
-
-  let removed = 0, skippedKeeper = 0;
+  // Delete exactly the keys that were selected. The dashboard never puts a
+  // checkbox on the keeper (oldest copy), so the keeper is never sent here —
+  // that is what protects it. (The old server-side "keeper re-scan" wrongly
+  // matched the copy being deleted and refused to delete it.)
+  let removed = 0;
   for (const k of imageKeys) {
-    if (keepers.has(k)) { skippedKeeper++; continue; }   // never delete a keeper
     let hit = false;
     if (trained[k]) { delete trained[k]; hit = true; }
     if (kb[k]) { delete kb[k]; hit = true; }
@@ -517,7 +489,7 @@ app.post('/admin/delete-duplicates', (req, res) => {
     if (hit) removed++;
   }
   saveKB(kb); saveTrained(trained); saveUnsolved(unsolved);
-  res.json({ ok: true, removed, skippedKeeper });
+  res.json({ ok: true, removed });
 });
 
 // Debug: return KB as key -> objectName (NO images) for the console inspector.
