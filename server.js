@@ -459,7 +459,13 @@ app.get('/admin/duplicates', (req, res) => {
     }
   }
   const dupCount = groups.reduce((s,g)=>s+(g.length-1),0);
-  res.json({ groups, groupCount: groups.length, duplicateCount: dupCount });
+  // Count trained tasks WITHOUT cell hashes — these can't be scanned for
+  // duplicates until "Secure All Tasks" is run. Report so admin knows.
+  let missingCells = 0;
+  for (const t of Object.values(trained)) {
+    if (!t.noObject && (!t.cellHashes || !t.cellHashes.length)) missingCells++;
+  }
+  res.json({ groups, groupCount: groups.length, duplicateCount: dupCount, missingCells });
 });
 
 // Delete specific tasks by imageKey (from trained AND/OR unsolved)
@@ -467,12 +473,43 @@ app.post('/admin/delete-duplicates', (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
   const { imageKeys } = req.body;
   if (!Array.isArray(imageKeys)) return res.status(400).json({ error: 'Missing imageKeys' });
-  // Delete the selected duplicate copies from trained/kb and/or unsolved.
-  // The "keeper" (oldest copy in each group) is never selectable in the UI,
-  // so it can never be sent here — at least one copy always survives.
+
   const kb = getKB(); const trained = getTrained(); const unsolved = getUnsolved();
-  let removed = 0;
+
+  // SAFETY: For every duplicate group, always keep the OLDEST copy (lowest task
+  // number; unsolved counts as newest). We re-scan groups here and remove the
+  // keeper from the delete list, so a keeper can NEVER be deleted even if the
+  // UI sent it. This guarantees at least one copy of every image survives.
+  const keepers = new Set();
+  {
+    const items = [];
+    for (const t of Object.values(trained))
+      if (t.cellHashes && t.cellHashes.length && !t.noObject)
+        items.push({ imageKey:t.imageKey, taskNumber:t.taskNumber||999999, objectName:t.objectName||'?', cellHashes:t.cellHashes });
+    for (const u of Object.values(unsolved))
+      if (u.cellHashes && u.cellHashes.length)
+        items.push({ imageKey:u.imageKey, taskNumber:999999, objectName:u.objectName||'?', cellHashes:u.cellHashes });
+    const used = new Set();
+    for (let i=0;i<items.length;i++){
+      if (used.has(items[i].imageKey)) continue;
+      const group=[items[i]];
+      for (let j=i+1;j<items.length;j++){
+        if (used.has(items[j].imageKey)) continue;
+        if (items[i].objectName===items[j].objectName && cellsMatch(items[i].cellHashes, items[j].cellHashes)){
+          group.push(items[j]); used.add(items[j].imageKey);
+        }
+      }
+      if (group.length>1){
+        used.add(items[i].imageKey);
+        group.sort((a,b)=>a.taskNumber-b.taskNumber);
+        keepers.add(group[0].imageKey);   // oldest = keeper, protected
+      }
+    }
+  }
+
+  let removed = 0, skippedKeeper = 0;
   for (const k of imageKeys) {
+    if (keepers.has(k)) { skippedKeeper++; continue; }   // never delete a keeper
     let hit = false;
     if (trained[k]) { delete trained[k]; hit = true; }
     if (kb[k]) { delete kb[k]; hit = true; }
@@ -480,7 +517,7 @@ app.post('/admin/delete-duplicates', (req, res) => {
     if (hit) removed++;
   }
   saveKB(kb); saveTrained(trained); saveUnsolved(unsolved);
-  res.json({ ok: true, removed });
+  res.json({ ok: true, removed, skippedKeeper });
 });
 
 // Debug: return KB as key -> objectName (NO images) for the console inspector.
