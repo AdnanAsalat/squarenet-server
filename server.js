@@ -128,6 +128,12 @@ function buildKBCache() {
   const kb = getKB();
   const lightKB = {};
   for (const [key, val] of Object.entries(kb)) {
+    // Build the content key (pixel-hash fingerprint) from stored cell hashes so
+    // the extension can match the same image even when its base64 differs.
+    let contentKey = null;
+    if (Array.isArray(val.cellHashes) && val.cellHashes.length && val.cellHashes.every(h => h)) {
+      contentKey = val.cellHashes.join('-');
+    }
     lightKB[key] = {
       objectName: val.objectName,
       noObject: val.noObject,
@@ -135,7 +141,8 @@ function buildKBCache() {
       gridRows: val.gridRows,
       gridCols: val.gridCols,
       taskNumber: val.taskNumber,
-      cellHashes: val.cellHashes || null
+      cellHashes: val.cellHashes || null,
+      contentKey: contentKey
     };
   }
   _lightKBCache = lightKB;
