@@ -214,6 +214,20 @@ app.post('/api/unsolved', (req, res) => {
       if (s && s.index != null) cellHashes[s.index] = s.src || '';
     }
   }
+  // SERVER-SIDE DEDUPE (safety net): if this image's content already matches a
+  // TRAINED task (same object + identical cell hashes), it's already known — do
+  // NOT add it to unsolved. This stops duplicates even when the extension's
+  // own content match misses (e.g. stale KB, sleeping service worker). The
+  // client can still solve it on its next KB refresh.
+  if (cellHashes && cellHashes.length && cellHashes.every(h => h)) {
+    const trained = getTrained();
+    for (const t of Object.values(trained)) {
+      if ((t.objectName||'') === (objectName||'') &&
+          Array.isArray(t.cellHashes) && cellsMatch(t.cellHashes, cellHashes)) {
+        return res.json({ ok: true, status: 'already_trained', taskNumber: t.taskNumber });
+      }
+    }
+  }
   unsolved[imageKey] = {
     id: uuidv4(), imageKey, imageSrc, taskText: taskText||'',
     objectName: objectName||'unknown', gridInfo: gridInfo||null,
