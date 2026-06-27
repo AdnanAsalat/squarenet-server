@@ -33,7 +33,23 @@ const getComplaints = () => readJSON('complaints.json');
 // ── Caches (declared early so save functions can clear them) ──
 let _lightKBCache = null, _squareKBCache = null;
 let _statsCache = null, _statsCacheTime = 0;
-function invalidateKBCache() { _lightKBCache = null; _squareKBCache = null; }
+let _trainedContentIndex = null;
+function invalidateKBCache() { _lightKBCache = null; _squareKBCache = null; _trainedContentIndex = null; }
+
+// Fast lookup: "objectName|cellHashes.join('-')" -> taskNumber, for all trained
+// tasks that have complete cell hashes. Rebuilt lazily after any trained change.
+function getTrainedContentIndex() {
+  if (_trainedContentIndex) return _trainedContentIndex;
+  const idx = {};
+  const trained = getTrained();
+  for (const t of Object.values(trained)) {
+    if (Array.isArray(t.cellHashes) && t.cellHashes.length && t.cellHashes.every(h => h)) {
+      idx[(t.objectName||'') + '|' + t.cellHashes.join('-')] = t.taskNumber;
+    }
+  }
+  _trainedContentIndex = idx;
+  return idx;
+}
 
 // Trained "version" — a number that changes whenever trained data changes.
 // The dashboard uses this to skip re-downloading trained data if nothing changed.
@@ -219,13 +235,14 @@ app.post('/api/unsolved', (req, res) => {
   // NOT add it to unsolved. This stops duplicates even when the extension's
   // own content match misses (e.g. stale KB, sleeping service worker). The
   // client can still solve it on its next KB refresh.
+  // Uses a fast content-key index (object|contentKey -> taskNumber) so this is
+  // an instant lookup instead of scanning every trained task.
   if (cellHashes && cellHashes.length && cellHashes.every(h => h)) {
-    const trained = getTrained();
-    for (const t of Object.values(trained)) {
-      if ((t.objectName||'') === (objectName||'') &&
-          Array.isArray(t.cellHashes) && cellsMatch(t.cellHashes, cellHashes)) {
-        return res.json({ ok: true, status: 'already_trained', taskNumber: t.taskNumber });
-      }
+    const idx = getTrainedContentIndex();
+    const lookup = (objectName||'') + '|' + cellHashes.join('-');
+    const hitNum = idx[lookup];
+    if (hitNum != null) {
+      return res.json({ ok: true, status: 'already_trained', taskNumber: hitNum });
     }
   }
   unsolved[imageKey] = {
