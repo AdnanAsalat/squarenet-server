@@ -220,9 +220,9 @@ app.post('/api/unsolved', (req, res) => {
   // the SAME object + identical cell hashes already exists, reuse THAT key
   // (update in place) instead of creating a second copy. Result: one unsolved
   // entry per image (still visible for training), no unsolved duplicates.
-  if (cellHashes && cellHashes.length && cellHashes.every(h => h)) {
+  if (cellHashes && cellHashes.length && cellHashes.every(h => h) && objectName) {
     for (const [exKey, ex] of Object.entries(unsolved)) {
-      if ((ex.objectName||'') === (objectName||'') &&
+      if (ex.objectName === objectName &&
           Array.isArray(ex.cellHashes) && cellsMatch(ex.cellHashes, cellHashes)) {
         return res.json({ ok: true, status: 'already_exists', merged: true });
       }
@@ -631,13 +631,15 @@ app.post('/admin/train', (req, res) => {
 
   // DEDUPE BY CONTENT: KolotiBablo serves the same image with slightly different
   // base64, so the same picture can arrive under a different imageKey. If an
-  // existing trained task has the SAME object name AND identical cell hashes,
+  // existing trained task has the SAME object name AND matching cell content,
   // remove that old entry first and reuse its task number — so re-training the
-  // same picture UPDATES it instead of creating a duplicate.
-  if (cellHashes && cellHashes.length && cellHashes.every(h=>h)) {
+  // same picture UPDATES it instead of creating a duplicate. The object name
+  // must match (and be non-empty): the SAME image can be a different task for a
+  // different object, and those must stay separate.
+  if (cellHashes && cellHashes.length && cellHashes.every(h=>h) && objectName) {
     for (const [oldKey, v] of Object.entries(trained)) {
       if (oldKey === imageKey) continue;
-      if ((v.objectName||'') === (objectName||'') &&
+      if (v.objectName === objectName &&
           Array.isArray(v.cellHashes) && cellsMatch(v.cellHashes, cellHashes)) {
         if (v.taskNumber) taskNumber = v.taskNumber;  // keep its number
         delete trained[oldKey];
