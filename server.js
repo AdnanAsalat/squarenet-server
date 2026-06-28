@@ -464,22 +464,36 @@ app.get('/admin/duplicates', (req, res) => {
     }
   }
 
-  const used = new Set();
+  // STEP 1 — group by EXACT content (instant via a map). This collapses the
+  // huge majority of duplicates (identical re-trains) without any O(n²) scan.
+  const exactMap = {};
+  for (const it of items) {
+    const key = it.objectName + '|' + it.cellHashes.join('-');
+    (exactMap[key] = exactMap[key] || []).push(it);
+  }
+  const buckets = Object.values(exactMap);
+
+  // STEP 2 — merge buckets whose representatives are near-duplicates (98.5%),
+  // to also catch the same image that drifted a few bits across JPEG re-encodes.
+  // We only compare one representative per bucket, so this is fast even with
+  // thousands of tasks (previously a full item×item scan timed out and silently
+  // returned only a fraction of the duplicates).
+  const usedB = new Set();
   const groups = [];
-  for (let i = 0; i < items.length; i++) {
-    if (used.has(items[i].imageKey)) continue;
-    const group = [items[i]];
-    for (let j = i+1; j < items.length; j++) {
-      if (used.has(items[j].imageKey)) continue;
-      // Content match via cellsMatch (98.5% tolerance) — catches the same image
-      // even when JPEG re-encoding shifted a few bits, so all real duplicates show.
-      if (items[i].objectName === items[j].objectName && cellsMatch(items[i].cellHashes, items[j].cellHashes)) {
-        group.push(items[j]);
-        used.add(items[j].imageKey);
+  for (let i = 0; i < buckets.length; i++) {
+    if (usedB.has(i)) continue;
+    let group = buckets[i].slice();
+    const rep = buckets[i][0];
+    for (let j = i+1; j < buckets.length; j++) {
+      if (usedB.has(j)) continue;
+      const rep2 = buckets[j][0];
+      if (rep.objectName === rep2.objectName && cellsMatch(rep.cellHashes, rep2.cellHashes)) {
+        group = group.concat(buckets[j]);
+        usedB.add(j);
       }
     }
     if (group.length > 1) {
-      used.add(items[i].imageKey);
+      usedB.add(i);
       group.sort((a,b)=>(a.taskNumber||999999)-(b.taskNumber||999999));
       groups.push(group.map(g => ({
         imageKey:g.imageKey, taskNumber:g.taskNumber, objectName:g.objectName,
