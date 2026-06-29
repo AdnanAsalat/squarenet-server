@@ -187,6 +187,66 @@ app.get('/api/kb', (req, res) => {
   });
 });
 
+// FAST SOLVE: extension sends this task's object + cellHashes; server checks the
+// plan, then looks the image up in the trained KB and returns ONLY the answer.
+// The extension keeps NO local KB — so plan expiry instantly stops solving, and
+// there's no big KB download. Exact match is an instant index lookup; if that
+// misses we do a 98.5% tolerant scan within the same object (JPEG drift).
+let _solveIndex = null;          // "object|contentKey" -> {selectedSquares,noObject,taskNumber}
+let _solveIndexVer = -1;
+function buildSolveIndex() {
+  const kb = getKB();
+  const idx = {};
+  for (const v of Object.values(kb)) {
+    if (!Array.isArray(v.cellHashes) || !v.cellHashes.length || !v.cellHashes.every(h=>h)) continue;
+    idx[(v.objectName||'') + '|' + v.cellHashes.join('-')] = {
+      selectedSquares: v.selectedSquares || [], noObject: !!v.noObject,
+      taskNumber: v.taskNumber, objectName: v.objectName, cellHashes: v.cellHashes
+    };
+  }
+  _solveIndex = idx;
+  _solveIndexVer = getTrainedVersion();
+}
+app.post('/api/solve', (req, res) => {
+  const apiKey = req.headers['x-api-key'] || req.query.apikey;
+  const client = getClientInfo(apiKey);
+  if (!client) return res.status(401).json({ error: 'Invalid API key' });
+
+  // PLAN CHECKS — if blocked, solving stops here (extension can't solve offline).
+  if (client.active === false) {
+    return res.status(403).json({ error: 'Account suspended', code: 'SUSPENDED' });
+  }
+  const { count } = getClientUsage(apiKey);
+  const plan = client.plan || 1000;
+  if (count >= plan) {
+    return res.status(403).json({ error: 'Daily limit reached', code: 'LIMIT_REACHED', used: count, limit: plan });
+  }
+  if (!getSolvingEnabled()) return res.json({ ok: true, match: null, solvingDisabled: true });
+
+  const { objectName, cellHashes } = req.body;
+  if (!objectName || !Array.isArray(cellHashes) || cellHashes.length !== 9 || !cellHashes.every(h=>h)) {
+    return res.json({ ok: true, match: null });   // not enough info → treat as unknown
+  }
+
+  // Rebuild index if training changed.
+  if (!_solveIndex || _solveIndexVer !== getTrainedVersion()) buildSolveIndex();
+
+  // 1) exact match (instant)
+  let hit = _solveIndex[objectName + '|' + cellHashes.join('-')];
+  // 2) tolerant match within same object (98.5%)
+  if (!hit) {
+    for (const k in _solveIndex) {
+      const cand = _solveIndex[k];
+      if (cand.objectName !== objectName) continue;
+      if (cellsMatch(cand.cellHashes, cellHashes)) { hit = cand; break; }
+    }
+  }
+  if (!hit) return res.json({ ok: true, match: null });
+  res.json({ ok: true, match: {
+    selectedSquares: hit.selectedSquares, noObject: hit.noObject, taskNumber: hit.taskNumber
+  }});
+});
+
 // Admin: read/set the global solving switch
 app.get('/admin/solving', (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
