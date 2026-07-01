@@ -521,11 +521,21 @@ async function updateDupBadge(){
 }
 async function loadDuplicates(){
   const el=document.getElementById('duplicates-list');
-  el.innerHTML='<div class="no-items">Scanning...</div>';
+  // If we already have a recent scan (from the background badge poll), render it
+  // instantly instead of showing "Scanning..." and waiting for a fresh scan.
+  if(window._dupData){
+    renderDuplicates(window._dupData);
+  } else {
+    el.innerHTML='<div class="no-items">Scanning...</div>';
+  }
   let data;
   try{ data=await api('GET','/admin/duplicates'); }
-  catch(e){ el.innerHTML='<div class="no-items">Error scanning</div>'; return; }
-
+  catch(e){ if(!window._dupData) el.innerHTML='<div class="no-items">Error scanning</div>'; return; }
+  window._dupData=data;
+  renderDuplicates(data);
+}
+function renderDuplicates(data){
+  const el=document.getElementById('duplicates-list');
   window._dupGroups=data.groups||[];
   const badge=document.getElementById('dup-badge');
   const cnt=document.getElementById('dup-count');
