@@ -741,8 +741,9 @@ function openComplaintRetrain(id){
 }
 
 // Ensure the FULL trained list is loaded (used when searching so results aren't
-// limited to the first page). Cached after the first full load.
-async function ensureAllTrained(){
+// limited to the first page). Cached after the first full load. Shows progress
+// and renders as it goes so it never looks frozen.
+async function ensureAllTrained(onProgress){
   if(window._allTrainedLoaded) return;
   let all=[],off=0;
   try{
@@ -750,22 +751,29 @@ async function ensureAllTrained(){
       const d=await api('GET','/admin/trained?offset='+off+'&limit=200');
       const list=d.list||[];
       all=all.concat(list);
+      window._allTrained=all;              // update as we go
+      if(onProgress) onProgress(all.length);
       if(list.length<200) break;
       off+=200;
       if(off>10000) break;
     }
     window._allTrained=all;
     window._allTrainedLoaded=true;
-  }catch(e){}
+  }catch(e){ window._allTrained=all; }
 }
 
+let _searchTimer=null;
 async function onTrainedSearch(){
   const q=document.getElementById('search-trained').value.trim();
   const btn=document.getElementById('trained-more-btn');
+  const el=document.getElementById('trained-list');
   if(q){
-    // Searching → load everything once, then filter across ALL tasks.
-    await ensureAllTrained();
     if(btn) btn.style.display='none';   // no Load More while searching
+    if(!window._allTrainedLoaded){
+      el.innerHTML='<div class="no-items">Loading all tasks for search… please wait</div>';
+      // Load full list, re-rendering results live as more tasks arrive.
+      await ensureAllTrained(()=>{ if(document.getElementById('search-trained').value.trim()) renderTrained(); });
+    }
   } else {
     updateTrainedMore();               // search cleared → restore paged view + Load More
   }
