@@ -50,8 +50,8 @@ function bumpTrainedVersion() {
 const saveClients  = d => { _statsCache=null; return writeJSON('clients.json', d); };
 const saveKB       = d => { invalidateKBCache(); _statsCache=null; return writeJSON('kb.json', d); };
 const saveSquareKB = d => { invalidateKBCache(); _statsCache=null; return writeJSON('square_kb.json', d); };
-const saveUnsolved = d => { _statsCache=null; return writeJSON('unsolved.json', d); };
-const saveTrained  = d => { invalidateKBCache(); _statsCache=null; bumpTrainedVersion(); return writeJSON('trained.json', d); };
+const saveUnsolved = d => { _statsCache=null; _dupCache=null; return writeJSON('unsolved.json', d); };
+const saveTrained  = d => { invalidateKBCache(); _statsCache=null; _dupCache=null; bumpTrainedVersion(); return writeJSON('trained.json', d); };
 const saveUsage    = d => writeJSON('usage.json', d);
 const saveComplaints = d => { _statsCache=null; return writeJSON('complaints.json', d); };
 
@@ -194,6 +194,7 @@ app.get('/api/kb', (req, res) => {
 // misses we do a 98.5% tolerant scan within the same object (JPEG drift).
 let _solveIndex = null;          // "object|contentKey" -> {selectedSquares,noObject,taskNumber}
 let _solveIndexVer = -1;
+let _dupCache = null, _dupCacheTime = 0;   // cached /admin/duplicates result
 function buildSolveIndex() {
   const kb = getKB();
   const idx = {};
@@ -298,6 +299,38 @@ app.post('/api/unsolved', (req, res) => {
           Array.isArray(ex.cellHashes) && cellsMatch(ex.cellHashes, cellHashes)) {
         return res.json({ ok: true, status: 'already_exists', merged: true });
       }
+    }
+  }
+  // ROOT-FIX for duplicates: before saving to unsolved, check if this image is
+  // ALREADY in the trained library (same object + content, 98.5%). This happens
+  // due to timing — a task can appear on several IDs and get sent to training in
+  // the moment before/around when it gets trained. If it's already trained, we do
+  // NOT create an unsolved copy (which the admin would then re-train → duplicate).
+  // It will simply auto-solve next time. We rebuild the index fresh so a just-
+  // trained task is caught.
+  if (cellHashes && cellHashes.length && cellHashes.every(h => h) && objectName) {
+    if (!_solveIndex || _solveIndexVer !== getTrainedVersion()) buildSolveIndex();
+    let already = _solveIndex[objectName + '|' + cellHashes.join('-')];
+    if (!already) {
+      for (const k in _solveIndex) {
+        const cand = _solveIndex[k];
+        if (cand.objectName !== objectName) continue;
+        if (cellsMatch(cand.cellHashes, cellHashes)) { already = cand; break; }
+      }
+    }
+    if (!already) {                 // not found → rebuild once and re-check (fresh)
+      buildSolveIndex();
+      already = _solveIndex[objectName + '|' + cellHashes.join('-')];
+      if (!already) {
+        for (const k in _solveIndex) {
+          const cand = _solveIndex[k];
+          if (cand.objectName !== objectName) continue;
+          if (cellsMatch(cand.cellHashes, cellHashes)) { already = cand; break; }
+        }
+      }
+    }
+    if (already) {
+      return res.json({ ok: true, status: 'already_trained', taskNumber: already.taskNumber });
     }
   }
   unsolved[imageKey] = {
@@ -518,6 +551,12 @@ function cellsMatch(a, b) {
 
 app.get('/admin/duplicates', (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
+  // Serve a cached result if fresh (the scan over thousands of tasks is heavy;
+  // caching makes opening the tab / the background badge poll instant). The cache
+  // is cleared whenever trained/unsolved change (see saveTrained/saveUnsolved).
+  if (_dupCache && (Date.now() - _dupCacheTime) < 20000) {
+    return res.json(_dupCache);
+  }
   const trained = getTrained();
   const unsolved = getUnsolved();
 
@@ -580,7 +619,9 @@ app.get('/admin/duplicates', (req, res) => {
   for (const t of Object.values(trained)) {
     if (!t.noObject && (!t.cellHashes || !t.cellHashes.length)) missingCells++;
   }
-  res.json({ groups, groupCount: groups.length, duplicateCount: dupCount, missingCells });
+  const result = { groups, groupCount: groups.length, duplicateCount: dupCount, missingCells };
+  _dupCache = result; _dupCacheTime = Date.now();
+  res.json(result);
 });
 
 // Delete specific tasks by imageKey (from trained AND/OR unsolved)
