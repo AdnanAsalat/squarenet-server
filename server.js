@@ -301,38 +301,6 @@ app.post('/api/unsolved', (req, res) => {
       }
     }
   }
-  // ROOT-FIX for duplicates: before saving to unsolved, check if this image is
-  // ALREADY in the trained library (same object + content, 98.5%). This happens
-  // due to timing — a task can appear on several IDs and get sent to training in
-  // the moment before/around when it gets trained. If it's already trained, we do
-  // NOT create an unsolved copy (which the admin would then re-train → duplicate).
-  // It will simply auto-solve next time. We rebuild the index fresh so a just-
-  // trained task is caught.
-  if (cellHashes && cellHashes.length && cellHashes.every(h => h) && objectName) {
-    if (!_solveIndex || _solveIndexVer !== getTrainedVersion()) buildSolveIndex();
-    let already = _solveIndex[objectName + '|' + cellHashes.join('-')];
-    if (!already) {
-      for (const k in _solveIndex) {
-        const cand = _solveIndex[k];
-        if (cand.objectName !== objectName) continue;
-        if (cellsMatch(cand.cellHashes, cellHashes)) { already = cand; break; }
-      }
-    }
-    if (!already) {                 // not found → rebuild once and re-check (fresh)
-      buildSolveIndex();
-      already = _solveIndex[objectName + '|' + cellHashes.join('-')];
-      if (!already) {
-        for (const k in _solveIndex) {
-          const cand = _solveIndex[k];
-          if (cand.objectName !== objectName) continue;
-          if (cellsMatch(cand.cellHashes, cellHashes)) { already = cand; break; }
-        }
-      }
-    }
-    if (already) {
-      return res.json({ ok: true, status: 'already_trained', taskNumber: already.taskNumber });
-    }
-  }
   unsolved[imageKey] = {
     id: uuidv4(), imageKey, imageSrc, taskText: taskText||'',
     objectName: objectName||'unknown', gridInfo: gridInfo||null,
@@ -845,8 +813,27 @@ app.delete('/admin/clients/:apiKey', (req, res) => {
   res.json({ ok: true });
 });
 
+// Tiny internal health route the self-ping hits.
+app.get('/keepalive', (req, res) => res.json({ ok: true, t: Date.now() }));
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`SquareNet Server v2.1 on port ${PORT}`);
   try { console.log('Data files:', require('fs').readdirSync(DATA_DIR)); } catch(e) {}
+
+  // SELF-PING keep-alive: the server pings itself every 4 minutes so Railway
+  // never puts it to sleep. This means the FIRST task after an idle period still
+  // gets an instant answer (critical because a task is only on screen ~5-7s — too
+  // short to wait for a cold start). It's ONE internal request (not per-profile),
+  // so it adds no meaningful load. Uses Railway's public domain if available.
+  const base = process.env.RAILWAY_PUBLIC_DOMAIN
+    ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+    : (process.env.SELF_URL || `http://127.0.0.1:${PORT}`);
+  setInterval(() => {
+    try {
+      const https = base.startsWith('https') ? require('https') : require('http');
+      https.get(base + '/keepalive', r => { r.on('data',()=>{}); r.on('end',()=>{}); })
+           .on('error', ()=>{});
+    } catch(e) {}
+  }, 240000);  // every 4 minutes
 });
