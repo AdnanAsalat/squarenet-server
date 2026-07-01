@@ -301,38 +301,6 @@ app.post('/api/unsolved', (req, res) => {
       }
     }
   }
-  // ROOT-FIX for duplicates: before saving to unsolved, check if this image is
-  // ALREADY in the trained library (same object + content, 98.5%). This happens
-  // due to timing — a task can appear on several IDs and get sent to training in
-  // the moment before/around when it gets trained. If it's already trained, we do
-  // NOT create an unsolved copy (which the admin would then re-train → duplicate).
-  // It will simply auto-solve next time. We rebuild the index fresh so a just-
-  // trained task is caught.
-  if (cellHashes && cellHashes.length && cellHashes.every(h => h) && objectName) {
-    if (!_solveIndex || _solveIndexVer !== getTrainedVersion()) buildSolveIndex();
-    let already = _solveIndex[objectName + '|' + cellHashes.join('-')];
-    if (!already) {
-      for (const k in _solveIndex) {
-        const cand = _solveIndex[k];
-        if (cand.objectName !== objectName) continue;
-        if (cellsMatch(cand.cellHashes, cellHashes)) { already = cand; break; }
-      }
-    }
-    if (!already) {                 // not found → rebuild once and re-check (fresh)
-      buildSolveIndex();
-      already = _solveIndex[objectName + '|' + cellHashes.join('-')];
-      if (!already) {
-        for (const k in _solveIndex) {
-          const cand = _solveIndex[k];
-          if (cand.objectName !== objectName) continue;
-          if (cellsMatch(cand.cellHashes, cellHashes)) { already = cand; break; }
-        }
-      }
-    }
-    if (already) {
-      return res.json({ ok: true, status: 'already_trained', taskNumber: already.taskNumber });
-    }
-  }
   unsolved[imageKey] = {
     id: uuidv4(), imageKey, imageSrc, taskText: taskText||'',
     objectName: objectName||'unknown', gridInfo: gridInfo||null,
