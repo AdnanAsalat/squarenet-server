@@ -231,15 +231,27 @@ app.post('/api/solve', (req, res) => {
   // Rebuild index if training changed.
   if (!_solveIndex || _solveIndexVer !== getTrainedVersion()) buildSolveIndex();
 
-  // 1) exact match (instant)
-  let hit = _solveIndex[objectName + '|' + cellHashes.join('-')];
-  // 2) tolerant match within same object (98.5%)
-  if (!hit) {
+  function lookup() {
+    // 1) exact match (instant)
+    let h = _solveIndex[objectName + '|' + cellHashes.join('-')];
+    if (h) return h;
+    // 2) tolerant match within same object (98.5%)
     for (const k in _solveIndex) {
       const cand = _solveIndex[k];
       if (cand.objectName !== objectName) continue;
-      if (cellsMatch(cand.cellHashes, cellHashes)) { hit = cand; break; }
+      if (cellsMatch(cand.cellHashes, cellHashes)) return cand;
     }
+    return null;
+  }
+
+  let hit = lookup();
+  // Safety: if nothing matched, the index may be stale (e.g. the task was just
+  // trained, or the server just woke from sleep and built the index before the
+  // latest save). Rebuild once from disk and try again so a freshly-trained task
+  // is never missed (which would otherwise create a duplicate).
+  if (!hit) {
+    buildSolveIndex();
+    hit = lookup();
   }
   if (!hit) return res.json({ ok: true, match: null });
   res.json({ ok: true, match: {
