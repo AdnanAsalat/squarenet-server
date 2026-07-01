@@ -323,18 +323,20 @@ function initApp(){
     if(t.dataset.tab==='duplicates') loadDuplicates();
   }));
   loadStats(); loadUnsolved(); loadSolvingStatus();
-  // On load, quietly get the duplicate count so the 👯 badge shows immediately —
-  // no need to open the tab or press Scan to discover duplicates exist.
-  updateDupBadge();
+  // Note: the duplicate scan is heavy, so we do NOT run it on load or on the
+  // auto-refresh — it runs only when you open the Duplicates tab.
   // Auto-refresh ONLY the unsolved tab. Skip while the train modal is open so
   // training stays smooth (no list reload / image re-fetch mid-train).
   setInterval(()=>{
     const modalOpen = document.getElementById('modal').classList.contains('open');
     if(modalOpen) return;   // training in progress — don't interrupt
     loadStats();
-    updateDupBadge();       // keep the 👯 badge current — new duplicates show automatically
     const activeTab = document.querySelector('.tab.active')?.dataset.tab;
     if(activeTab==='unsolved') loadUnsolved();
+    // Duplicate badge is refreshed only when the Duplicates tab is opened (see
+    // tab handler), NOT on every cycle — the full scan is heavy and was slowing
+    // the whole dashboard.
+    if(activeTab==='duplicates') updateDupBadge();
   }, 8000);
 }
 
