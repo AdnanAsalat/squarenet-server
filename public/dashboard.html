@@ -177,7 +177,7 @@ input:focus{border-color:var(--accent)}
     <!-- TRAINED -->
     <div class="pane" id="pane-trained">
       <div class="toolbar">
-        <input class="search" id="search-trained" placeholder="🔍 Search..." oninput="renderTrained()">
+        <input class="search" id="search-trained" placeholder="🔍 Search name ya #number..." oninput="onTrainedSearch()">
         <button class="btn btn-sm" id="solving-toggle" onclick="toggleSolving()" style="background:#22c55e;color:#fff">⏳ Solving: ...</button>
         <div class="spacer"></div>
         <button class="btn btn-amber btn-sm" onclick="renumberTasks()">🔢 Fix Numbers</button>
@@ -323,12 +323,16 @@ function initApp(){
     if(t.dataset.tab==='duplicates') loadDuplicates();
   }));
   loadStats(); loadUnsolved(); loadSolvingStatus();
+  // On load, quietly get the duplicate count so the 👯 badge shows immediately —
+  // no need to open the tab or press Scan to discover duplicates exist.
+  updateDupBadge();
   // Auto-refresh ONLY the unsolved tab. Skip while the train modal is open so
   // training stays smooth (no list reload / image re-fetch mid-train).
   setInterval(()=>{
     const modalOpen = document.getElementById('modal').classList.contains('open');
     if(modalOpen) return;   // training in progress — don't interrupt
     loadStats();
+    updateDupBadge();       // keep the 👯 badge current — new duplicates show automatically
     const activeTab = document.querySelector('.tab.active')?.dataset.tab;
     if(activeTab==='unsolved') loadUnsolved();
   }, 8000);
@@ -390,8 +394,13 @@ function updateLoadMore(){
 }
 
 function renderUnsolved(){
-  const q=document.getElementById('search-unsolved').value.toLowerCase();
-  const items=unsolvedData.filter(e=>!q||(e.objectName||'').toLowerCase().includes(q));
+  const q=document.getElementById('search-unsolved').value.toLowerCase().trim();
+  const items=unsolvedData.filter(e=>{
+    if(!q) return true;
+    const obj=(e.objectName||'').toLowerCase();
+    const num=String(e.taskNumber||'');
+    return obj.includes(q) || num===q.replace('#','') || num.includes(q.replace('#',''));
+  });
   const el=document.getElementById('unsolved-list');
   if(!items.length){el.innerHTML='<div class="no-items">🎉 Koi unsolved nahi!</div>';return;}
   el.innerHTML=items.map((e,i)=>`
@@ -494,6 +503,22 @@ function buildCellHashesOnly(src,rows,cols){
 }
 
 // ── DUPLICATES (display only — delete is manual per item) ──────
+// Lightweight: just fetch the duplicate count and update the 👯 badge. Runs on
+// load and on the auto-refresh timer so duplicates are visible without opening
+// the tab or pressing Scan.
+async function updateDupBadge(){
+  try{
+    const data=await api('GET','/admin/duplicates');
+    const badge=document.getElementById('dup-badge');
+    if(badge){
+      if(data.duplicateCount){ badge.style.display='inline-block'; badge.textContent=data.duplicateCount; }
+      else { badge.style.display='none'; }
+    }
+    // Cache so opening the tab is instant.
+    window._dupGroups=data.groups||[];
+    window._dupData=data;
+  }catch(e){}
+}
 async function loadDuplicates(){
   const el=document.getElementById('duplicates-list');
   el.innerHTML='<div class="no-items">Scanning...</div>';
@@ -705,9 +730,49 @@ function openComplaintRetrain(id){
   openModal(entry);
 }
 
+// Ensure the FULL trained list is loaded (used when searching so results aren't
+// limited to the first page). Cached after the first full load.
+async function ensureAllTrained(){
+  if(window._allTrainedLoaded) return;
+  let all=[],off=0;
+  try{
+    while(true){
+      const d=await api('GET','/admin/trained?offset='+off+'&limit=200');
+      const list=d.list||[];
+      all=all.concat(list);
+      if(list.length<200) break;
+      off+=200;
+      if(off>10000) break;
+    }
+    window._allTrained=all;
+    window._allTrainedLoaded=true;
+  }catch(e){}
+}
+
+async function onTrainedSearch(){
+  const q=document.getElementById('search-trained').value.trim();
+  const btn=document.getElementById('trained-more-btn');
+  if(q){
+    // Searching → load everything once, then filter across ALL tasks.
+    await ensureAllTrained();
+    if(btn) btn.style.display='none';   // no Load More while searching
+  } else {
+    updateTrainedMore();               // search cleared → restore paged view + Load More
+  }
+  renderTrained();
+}
+
 function renderTrained(){
-  const q=document.getElementById('search-trained').value.toLowerCase();
-  const items=trainedData.filter(e=>!q||(e.objectName||'').toLowerCase().includes(q));
+  const q=document.getElementById('search-trained').value.toLowerCase().trim();
+  // When searching, filter across the FULL list; otherwise show the paged list.
+  const source = q ? (window._allTrained||trainedData) : trainedData;
+  const items=source.filter(e=>{
+    if(!q) return true;
+    const obj=(e.objectName||'').toLowerCase();
+    const num=String(e.taskNumber||'');
+    // match by object name OR by task number (with or without a leading #)
+    return obj.includes(q) || num===q.replace('#','') || num.includes(q.replace('#',''));
+  });
   const el=document.getElementById('trained-list');
   if(!items.length){el.innerHTML='<div class="no-items">Koi trained entry nahi</div>';return;}
   el.innerHTML=items.map(e=>{
