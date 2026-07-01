@@ -845,8 +845,27 @@ app.delete('/admin/clients/:apiKey', (req, res) => {
   res.json({ ok: true });
 });
 
+// Tiny internal health route the self-ping hits.
+app.get('/keepalive', (req, res) => res.json({ ok: true, t: Date.now() }));
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`SquareNet Server v2.1 on port ${PORT}`);
   try { console.log('Data files:', require('fs').readdirSync(DATA_DIR)); } catch(e) {}
+
+  // SELF-PING keep-alive: the server pings itself every 4 minutes so Railway
+  // never puts it to sleep. This means the FIRST task after an idle period still
+  // gets an instant answer (critical because a task is only on screen ~5-7s — too
+  // short to wait for a cold start). It's ONE internal request (not per-profile),
+  // so it adds no meaningful load. Uses Railway's public domain if available.
+  const base = process.env.RAILWAY_PUBLIC_DOMAIN
+    ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+    : (process.env.SELF_URL || `http://127.0.0.1:${PORT}`);
+  setInterval(() => {
+    try {
+      const https = base.startsWith('https') ? require('https') : require('http');
+      https.get(base + '/keepalive', r => { r.on('data',()=>{}); r.on('end',()=>{}); })
+           .on('error', ()=>{});
+    } catch(e) {}
+  }, 240000);  // every 4 minutes
 });
