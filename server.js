@@ -91,7 +91,7 @@ app.get('/api/validate', (req, res) => {
   clients[apiKey].lastSeen = new Date().toISOString();
   saveClients(clients);
   const { count } = getClientUsage(apiKey);
-  const plan = client.plan || 1000;
+  const plan = (client.plan != null) ? client.plan : 1000;
   const remaining = Math.max(0, plan - count);
   const midnight = new Date(); midnight.setHours(24,0,0,0);
   const hoursLeft = Math.round((midnight - new Date()) / 3600000);
@@ -168,7 +168,7 @@ app.get('/api/kb', (req, res) => {
   }
   {
     const { count } = getClientUsage(apiKey);
-    const plan = client.plan || 1000;
+    const plan = (client.plan != null) ? client.plan : 1000;
     if (count >= plan) {
       return res.status(403).json({ error: 'Daily limit reached. Upgrade your plan.', code: 'LIMIT_REACHED', used: count, limit: plan });
     }
@@ -216,7 +216,7 @@ app.post('/api/solve', (req, res) => {
     return res.status(403).json({ error: 'Plan expired', code: 'EXPIRED' });
   }
   const { count } = getClientUsage(apiKey);
-  const plan = client.plan || 1000;
+  const plan = (client.plan != null) ? client.plan : 1000;
   if (count >= plan) {
     return res.status(403).json({ error: 'Daily limit reached', code: 'LIMIT_REACHED', used: count, limit: plan });
   }
