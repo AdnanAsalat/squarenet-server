@@ -99,7 +99,7 @@ app.get('/api/validate', (req, res) => {
   let daysLeft = null, expired = false;
   if (client.expiresAt) {
     const ms = new Date(client.expiresAt) - new Date();
-    daysLeft = Math.max(0, Math.ceil(ms / 86400000));
+    daysLeft = Math.max(0, Math.floor(ms / 86400000));
     expired = ms <= 0;
   }
   res.json({ valid: true, name: client.name, plan, usedToday: count, remaining,
@@ -673,7 +673,7 @@ app.get('/admin/clients', (req, res) => {
     // Add days-left + expired flag so the dashboard can show plan status.
     if (clients[k].expiresAt) {
       const ms = new Date(clients[k].expiresAt) - new Date();
-      clients[k].daysLeft = Math.max(0, Math.ceil(ms / 86400000));
+      clients[k].daysLeft = Math.max(0, Math.floor(ms / 86400000));
       clients[k].expired = ms <= 0;
     } else {
       clients[k].daysLeft = null; clients[k].expired = false;
