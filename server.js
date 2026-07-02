@@ -54,6 +54,13 @@ function getClientInfo(apiKey) {
   if (!apiKey) return null;
   return getClients()[apiKey] || null;
 }
+// Plan expiry check: true if the client's plan has run out (past expiresAt).
+// Clients with no expiresAt (older ones) are treated as NOT expired, so existing
+// clients keep working until you set a date for them.
+function isExpired(client) {
+  if (!client || !client.expiresAt) return false;
+  return new Date(client.expiresAt) <= new Date();
+}
 function incrementUsage(apiKey) {
   const usage = getUsage(); const today = getTodayKey();
   if (!usage[apiKey]) usage[apiKey] = {};
@@ -88,7 +95,16 @@ app.get('/api/validate', (req, res) => {
   const remaining = Math.max(0, plan - count);
   const midnight = new Date(); midnight.setHours(24,0,0,0);
   const hoursLeft = Math.round((midnight - new Date()) / 3600000);
-  res.json({ valid: true, name: client.name, plan, usedToday: count, remaining, resetInHours: hoursLeft, active: client.active !== false });
+  // Days left until the plan expires (null if no expiry set).
+  let daysLeft = null, expired = false;
+  if (client.expiresAt) {
+    const ms = new Date(client.expiresAt) - new Date();
+    daysLeft = Math.max(0, Math.ceil(ms / 86400000));
+    expired = ms <= 0;
+  }
+  res.json({ valid: true, name: client.name, plan, usedToday: count, remaining,
+    resetInHours: hoursLeft, active: client.active !== false,
+    expiresAt: client.expiresAt || null, daysLeft, expired });
 });
 function getClientUsage(apiKey) {
   const usage = getUsage(); const today = getTodayKey();
@@ -147,14 +163,15 @@ app.get('/api/kb', (req, res) => {
   if (client.active === false) {
     return res.status(403).json({ error: 'Account suspended', code: 'SUSPENDED' });
   }
-  const { count } = getClientUsage(apiKey);
-  const plan = client.plan || 1000;
-  if (count >= plan) {
-    return res.status(403).json({ 
-      error: 'Daily limit reached. Upgrade your plan.', 
-      code: 'LIMIT_REACHED',
-      used: count, limit: plan
-    });
+  if (isExpired(client)) {
+    return res.status(403).json({ error: 'Plan expired', code: 'EXPIRED' });
+  }
+  {
+    const { count } = getClientUsage(apiKey);
+    const plan = client.plan || 1000;
+    if (count >= plan) {
+      return res.status(403).json({ error: 'Daily limit reached. Upgrade your plan.', code: 'LIMIT_REACHED', used: count, limit: plan });
+    }
   }
   // Use cached light KB (rebuilt only when training changes) — much faster,
   // avoids re-reading and stripping the large kb.json on every client request.
@@ -194,6 +211,9 @@ app.post('/api/solve', (req, res) => {
   // PLAN CHECKS — if blocked, solving stops here (extension can't solve offline).
   if (client.active === false) {
     return res.status(403).json({ error: 'Account suspended', code: 'SUSPENDED' });
+  }
+  if (isExpired(client)) {
+    return res.status(403).json({ error: 'Plan expired', code: 'EXPIRED' });
   }
   const { count } = getClientUsage(apiKey);
   const plan = client.plan || 1000;
@@ -648,30 +668,58 @@ app.delete('/admin/trained/:key', (req, res) => {
 app.get('/admin/clients', (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
   const clients = getClients(); const usage = getUsage(); const today = getTodayKey();
-  for (const k of Object.keys(clients)) clients[k].usedToday = (usage[k]||{})[today]||0;
+  for (const k of Object.keys(clients)) {
+    clients[k].usedToday = (usage[k]||{})[today]||0;
+    // Add days-left + expired flag so the dashboard can show plan status.
+    if (clients[k].expiresAt) {
+      const ms = new Date(clients[k].expiresAt) - new Date();
+      clients[k].daysLeft = Math.max(0, Math.ceil(ms / 86400000));
+      clients[k].expired = ms <= 0;
+    } else {
+      clients[k].daysLeft = null; clients[k].expired = false;
+    }
+  }
   res.json({ clients });
 });
 app.post('/admin/clients', (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
-  const { name, plan, apiKey: providedKey } = req.body;
+  const { name, plan, apiKey: providedKey, expiresAt, durationDays } = req.body;
   if (!name) return res.status(400).json({ error: 'Name required' });
   const clients = getClients();
   const apiKey = providedKey || ('sn_' + uuidv4().replace(/-/g,'').substring(0,24));
+  // Expiry: use the exact date the portal sends, else compute from durationDays
+  // (default 30) starting NOW (client's buy moment). This is what stops solving
+  // when the plan runs out.
+  let exp = expiresAt || null;
+  if (!exp) {
+    const d = new Date();
+    d.setDate(d.getDate() + (durationDays || 30));
+    exp = d.toISOString();
+  }
   clients[apiKey] = { name, apiKey, plan:plan||1000, active:true,
-    createdAt:new Date().toISOString(), lastSeen:null };
+    createdAt:new Date().toISOString(), expiresAt: exp, lastSeen:null };
   saveClients(clients);
-  res.json({ ok:true, apiKey, name });
+  res.json({ ok:true, apiKey, name, expiresAt: exp });
 });
 app.patch('/admin/clients/:apiKey', (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
   const clients = getClients();
   if (!clients[req.params.apiKey]) return res.status(404).json({ error: 'Not found' });
-  const { plan, active, name } = req.body;
+  const { plan, active, name, expiresAt, durationDays, renew } = req.body;
   if (plan !== undefined) clients[req.params.apiKey].plan = plan;
   if (active !== undefined) clients[req.params.apiKey].active = active;
   if (name !== undefined) clients[req.params.apiKey].name = name;
+  // Renew/extend expiry. If an exact date is sent, use it. If renew+durationDays,
+  // add that many days from NOW (fresh 30-day plan on renewal).
+  if (expiresAt !== undefined) clients[req.params.apiKey].expiresAt = expiresAt;
+  else if (renew || durationDays) {
+    const d = new Date();
+    d.setDate(d.getDate() + (durationDays || 30));
+    clients[req.params.apiKey].expiresAt = d.toISOString();
+    clients[req.params.apiKey].active = true;   // renewing re-activates
+  }
   saveClients(clients);
-  res.json({ ok: true });
+  res.json({ ok: true, expiresAt: clients[req.params.apiKey].expiresAt });
 });
 app.delete('/admin/clients/:apiKey', (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
