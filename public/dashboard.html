@@ -323,11 +323,8 @@ function initApp(){
     if(t.dataset.tab==='duplicates') loadDuplicates();
   }));
   loadStats(); loadUnsolved(); loadSolvingStatus();
-  // Note: the duplicate scan is heavy, so we do NOT run it on load or on the
-  // auto-refresh — it runs only when you open the Duplicates tab.
-  // Warm up the full trained list in the background (a few seconds after load)
-  // so search is instant when you use it — without slowing the initial load.
-  setTimeout(()=>{ ensureAllTrained(); }, 3000);
+  // Note: full trained list loads only when you actually search (in onTrainedSearch),
+  // NOT in the background — preloading 3000+ tasks with images was slowing the dashboard.
   // Auto-refresh ONLY the unsolved tab. Skip while the train modal is open so
   // training stays smooth (no list reload / image re-fetch mid-train).
   setInterval(()=>{
