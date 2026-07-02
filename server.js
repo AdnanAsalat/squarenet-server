@@ -1,774 +1,1084 @@
-// squarenet-server v2.1 — AACaptcha Solver Backend
-const express = require('express');
-const cors = require('cors');
-const { v4: uuidv4 } = require('uuid');
-const fs = require('fs');
-const path = require('path');
-const app = express();
-app.use(cors());
-app.use(express.json({ limit: '50mb' }));
-app.use(express.static('public'));
-const DATA_DIR = path.join(__dirname, 'data');
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-function readJSON(file, def={}) {
-  const fp = path.join(DATA_DIR, file);
-  if (!fs.existsSync(fp)) return def;
-  try { return JSON.parse(fs.readFileSync(fp, 'utf8')); } catch(e) { return def; }
-}
-function writeJSON(file, data) {
-  fs.writeFileSync(path.join(DATA_DIR, file), JSON.stringify(data), 'utf8');
-}
-const getClients  = () => readJSON('clients.json');
-const getKB       = () => readJSON('kb.json');
-const getSquareKB = () => readJSON('square_kb.json');
-const getUnsolved = () => readJSON('unsolved.json');
-const getTrained  = () => readJSON('trained.json');
-const getUsage    = () => readJSON('usage.json');
-const getComplaints = () => readJSON('complaints.json');
-// ── Caches (declared early so save functions can clear them) ──
-let _lightKBCache = null, _squareKBCache = null;
-let _statsCache = null, _statsCacheTime = 0;
-function invalidateKBCache() { _lightKBCache = null; _squareKBCache = null; }
-// Trained "version" — a number that changes whenever trained data changes.
-// The dashboard uses this to skip re-downloading trained data if nothing changed.
-function getTrainedVersion() {
-  try { return JSON.parse(fs.readFileSync(path.join(DATA_DIR,'trained_version.json'),'utf8')).v || 0; }
-  catch(e) { return 0; }
-}
-function bumpTrainedVersion() {
-  const v = getTrainedVersion() + 1;
-  try { fs.writeFileSync(path.join(DATA_DIR,'trained_version.json'), JSON.stringify({v}), 'utf8'); } catch(e){}
-  return v;
-}
-const saveClients  = d => { _statsCache=null; return writeJSON('clients.json', d); };
-const saveKB       = d => { invalidateKBCache(); _statsCache=null; return writeJSON('kb.json', d); };
-const saveSquareKB = d => { invalidateKBCache(); _statsCache=null; return writeJSON('square_kb.json', d); };
-const saveUnsolved = d => { _statsCache=null; _dupCache=null; return writeJSON('unsolved.json', d); };
-const saveTrained  = d => { invalidateKBCache(); _statsCache=null; _dupCache=null; bumpTrainedVersion(); return writeJSON('trained.json', d); };
-const saveUsage    = d => writeJSON('usage.json', d);
-const saveComplaints = d => { _statsCache=null; return writeJSON('complaints.json', d); };
-const ADMIN_PASS = process.env.ADMIN_PASS || 'admin123';
-function isAdmin(req) { return req.headers['x-admin-pass'] === ADMIN_PASS; }
-function getTodayKey() { return new Date().toISOString().slice(0,10); }
-function getClientInfo(apiKey) {
-  if (!apiKey) return null;
-  return getClients()[apiKey] || null;
-}
-// Plan expiry check: true if the client's plan has run out (past expiresAt).
-// Clients with no expiresAt (older ones) are treated as NOT expired, so existing
-// clients keep working until you set a date for them.
-function isExpired(client) {
-  if (!client || !client.expiresAt) return false;
-  return new Date(client.expiresAt) <= new Date();
-}
-function incrementUsage(apiKey) {
-  const usage = getUsage(); const today = getTodayKey();
-  if (!usage[apiKey]) usage[apiKey] = {};
-  usage[apiKey][today] = (usage[apiKey][today] || 0) + 1;
-  saveUsage(usage);
-  return usage[apiKey][today];
-}
-// Auto-create default client
-const DEFAULT_KEY = process.env.DEFAULT_CLIENT_KEY;
-if (DEFAULT_KEY) {
-  const clients = getClients();
-  if (!clients[DEFAULT_KEY]) {
-    clients[DEFAULT_KEY] = {
-      name: process.env.DEFAULT_CLIENT_NAME || 'Admin',
-      apiKey: DEFAULT_KEY, plan: 9999999, active: true,
-      createdAt: new Date().toISOString(), lastSeen: null
-    };
-    saveClients(clients);
-    console.log('Default client created:', DEFAULT_KEY);
-  }
-}
-// ── CLIENT API ────────────────────────────────────────────────
-app.get('/api/validate', (req, res) => {
-  const apiKey = req.headers['x-api-key'] || req.query.apikey;
-  const client = getClientInfo(apiKey);
-  if (!client) return res.json({ valid: false, error: 'Invalid API key' });
-  const clients = getClients();
-  clients[apiKey].lastSeen = new Date().toISOString();
-  saveClients(clients);
-  const { count } = getClientUsage(apiKey);
-  const plan = (client.plan != null) ? client.plan : 1000;
-  const remaining = Math.max(0, plan - count);
-  const midnight = new Date(); midnight.setHours(24,0,0,0);
-  const hoursLeft = Math.round((midnight - new Date()) / 3600000);
-  // Days left until the plan expires (null if no expiry set).
-  let daysLeft = null, expired = false;
-  if (client.expiresAt) {
-    const ms = new Date(client.expiresAt) - new Date();
-    daysLeft = Math.max(0, Math.floor(ms / 86400000));
-    expired = ms <= 0;
-  }
-  res.json({ valid: true, name: client.name, plan, usedToday: count, remaining,
-    resetInHours: hoursLeft, active: client.active !== false,
-    expiresAt: client.expiresAt || null, daysLeft, expired });
-});
-function getClientUsage(apiKey) {
-  const usage = getUsage(); const today = getTodayKey();
-  if (!usage[apiKey]) usage[apiKey] = {};
-  if (!usage[apiKey][today]) usage[apiKey][today] = 0;
-  return { usage, today, count: usage[apiKey][today] };
-}
-// Lightweight version check - returns only size, not full KB
-app.get('/api/kb-version', (req, res) => {
-  const apiKey = req.headers['x-api-key'] || req.query.apikey;
-  if (!getClientInfo(apiKey)) return res.status(401).json({ error: 'Invalid API key' });
-  const kb = getKB();
-  const sqKB = getSquareKB();
-  res.json({ 
-    size: Object.keys(kb).length,
-    sqSize: Object.keys(sqKB).length,
-    updatedAt: new Date().toISOString()
-  });
-});
-// Build light KB (no images). Rebuilt only when training changes.
-function buildKBCache() {
-  const kb = getKB();
-  const lightKB = {};
-  for (const [key, val] of Object.entries(kb)) {
-    let contentKey = null;
-    if (Array.isArray(val.cellHashes) && val.cellHashes.length && val.cellHashes.every(h => h)) {
-      contentKey = val.cellHashes.join('-');
-    }
-    lightKB[key] = {
-      objectName: val.objectName,
-      noObject: val.noObject,
-      selectedSquares: val.selectedSquares,
-      gridRows: val.gridRows,
-      gridCols: val.gridCols,
-      taskNumber: val.taskNumber,
-      cellHashes: val.cellHashes || null,
-      contentKey: contentKey
-    };
-  }
-  _lightKBCache = lightKB;
-  _squareKBCache = getSquareKB();
-}
-// Global solving switch (ON by default). When OFF, extensions stop solving for
-// everyone (training still works). Stored in a tiny file so it survives restarts.
-function getSolvingEnabled() {
-  try { return JSON.parse(fs.readFileSync(path.join(DATA_DIR,'settings.json'),'utf8')).solvingEnabled !== false; }
-  catch(e) { return true; }
-}
-function setSolvingEnabled(on) {
-  try { fs.writeFileSync(path.join(DATA_DIR,'settings.json'), JSON.stringify({ solvingEnabled: !!on }), 'utf8'); } catch(e){}
-}
-app.get('/api/kb', (req, res) => {
-  const apiKey = req.headers['x-api-key'] || req.query.apikey;
-  const client = getClientInfo(apiKey);
-  if (!client) return res.status(401).json({ error: 'Invalid API key' });
-  if (client.active === false) {
-    return res.status(403).json({ error: 'Account suspended', code: 'SUSPENDED' });
-  }
-  if (isExpired(client)) {
-    return res.status(403).json({ error: 'Plan expired', code: 'EXPIRED' });
-  }
-  {
-    const { count } = getClientUsage(apiKey);
-    const plan = (client.plan != null) ? client.plan : 1000;
-    if (count >= plan) {
-      return res.status(403).json({ error: 'Daily limit reached. Upgrade your plan.', code: 'LIMIT_REACHED', used: count, limit: plan });
-    }
-  }
-  // Use cached light KB (rebuilt only when training changes) — much faster,
-  // avoids re-reading and stripping the large kb.json on every client request.
-  if (!_lightKBCache || !_squareKBCache) buildKBCache();
-  res.json({
-    kb: _lightKBCache,
-    squareKB: _squareKBCache,
-    solvingEnabled: getSolvingEnabled(),   // global ON/OFF for all extensions
-    updatedAt: new Date().toISOString()
-  });
-});
-// FAST SOLVE: extension sends this task's object + cellHashes; server checks the
-// plan, then looks the image up in the trained KB and returns ONLY the answer.
-// The extension keeps NO local KB — so plan expiry instantly stops solving, and
-// there's no big KB download. Exact match is an instant index lookup; if that
-// misses we do a 98.5% tolerant scan within the same object (JPEG drift).
-let _solveIndex = null;          // "object|contentKey" -> {selectedSquares,noObject,taskNumber}
-let _solveIndexVer = -1;
-let _dupCache = null, _dupCacheTime = 0;   // cached /admin/duplicates result
-function buildSolveIndex() {
-  const kb = getKB();
-  const idx = {};
-  for (const v of Object.values(kb)) {
-    if (!Array.isArray(v.cellHashes) || !v.cellHashes.length || !v.cellHashes.every(h=>h)) continue;
-    idx[(v.objectName||'') + '|' + v.cellHashes.join('-')] = {
-      selectedSquares: v.selectedSquares || [], noObject: !!v.noObject,
-      taskNumber: v.taskNumber, objectName: v.objectName, cellHashes: v.cellHashes
-    };
-  }
-  _solveIndex = idx;
-  _solveIndexVer = getTrainedVersion();
-}
-app.post('/api/solve', (req, res) => {
-  const apiKey = req.headers['x-api-key'] || req.query.apikey;
-  const client = getClientInfo(apiKey);
-  if (!client) return res.status(401).json({ error: 'Invalid API key' });
-  // PLAN CHECKS — if blocked, solving stops here (extension can't solve offline).
-  if (client.active === false) {
-    return res.status(403).json({ error: 'Account suspended', code: 'SUSPENDED' });
-  }
-  if (isExpired(client)) {
-    return res.status(403).json({ error: 'Plan expired', code: 'EXPIRED' });
-  }
-  const { count } = getClientUsage(apiKey);
-  const plan = (client.plan != null) ? client.plan : 1000;
-  if (count >= plan) {
-    return res.status(403).json({ error: 'Daily limit reached', code: 'LIMIT_REACHED', used: count, limit: plan });
-  }
-  if (!getSolvingEnabled()) return res.json({ ok: true, match: null, solvingDisabled: true });
-  const { objectName, cellHashes } = req.body;
-  if (!objectName || !Array.isArray(cellHashes) || cellHashes.length !== 9 || !cellHashes.every(h=>h)) {
-    return res.json({ ok: true, match: null });   // not enough info → treat as unknown
-  }
-  // Rebuild index if training changed.
-  if (!_solveIndex || _solveIndexVer !== getTrainedVersion()) buildSolveIndex();
-  function lookup() {
-    // 1) exact match (instant)
-    let h = _solveIndex[objectName + '|' + cellHashes.join('-')];
-    if (h) return h;
-    // 2) tolerant match within same object (98.5%)
-    for (const k in _solveIndex) {
-      const cand = _solveIndex[k];
-      if (cand.objectName !== objectName) continue;
-      if (cellsMatch(cand.cellHashes, cellHashes)) return cand;
-    }
-    return null;
-  }
-  let hit = lookup();
-  // Safety: if nothing matched, the index may be stale (e.g. the task was just
-  // trained, or the server just woke from sleep and built the index before the
-  // latest save). Rebuild once from disk and try again so a freshly-trained task
-  // is never missed (which would otherwise create a duplicate).
-  if (!hit) {
-    buildSolveIndex();
-    hit = lookup();
-  }
-  if (!hit) return res.json({ ok: true, match: null });
-  res.json({ ok: true, match: {
-    selectedSquares: hit.selectedSquares, noObject: hit.noObject, taskNumber: hit.taskNumber
-  }});
-});
-// Admin: read/set the global solving switch
-app.get('/admin/solving', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
-  res.json({ solvingEnabled: getSolvingEnabled() });
-});
-app.post('/admin/solving', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
-  setSolvingEnabled(!!req.body.solvingEnabled);
-  res.json({ ok: true, solvingEnabled: getSolvingEnabled() });
-});
-app.post('/api/unsolved', (req, res) => {
-  const apiKey = req.headers['x-api-key'] || req.query.apikey;
-  const client = getClientInfo(apiKey);
-  if (!client) return res.status(401).json({ error: 'Invalid API key' });
-  const { imageKey, imageSrc, taskText, objectName, gridInfo, squareImages } = req.body;
-  if (!imageKey || !imageSrc) return res.status(400).json({ error: 'Missing data' });
-  const unsolved = getUnsolved();
-  if (unsolved[imageKey]) return res.json({ ok: true, status: 'already_exists' });
-  // Build ordered cellHashes from squareImages (for duplicate detection)
-  let cellHashes = null;
-  if (Array.isArray(squareImages) && squareImages.length) {
-    cellHashes = [];
-    for (const s of squareImages) {
-      if (s && s.index != null) cellHashes[s.index] = s.src || '';
-    }
-  }
-  // CONTENT DEDUPE in unsolved: KolotiBablo serves the same image with a slightly
-  // different base64 each time, so the same picture can arrive under a different
-  // imageKey and pile up as multiple unsolved copies. If an unsolved entry with
-  // the SAME object + identical cell hashes already exists, reuse THAT key
-  // (update in place) instead of creating a second copy. Result: one unsolved
-  // entry per image (still visible for training), no unsolved duplicates.
-  if (cellHashes && cellHashes.length && cellHashes.every(h => h) && objectName) {
-    for (const [exKey, ex] of Object.entries(unsolved)) {
-      if (ex.objectName === objectName &&
-          Array.isArray(ex.cellHashes) && cellsMatch(ex.cellHashes, cellHashes)) {
-        return res.json({ ok: true, status: 'already_exists', merged: true });
-      }
-    }
-  }
-  unsolved[imageKey] = {
-    id: uuidv4(), imageKey, imageSrc, taskText: taskText||'',
-    objectName: objectName||'unknown', gridInfo: gridInfo||null,
-    squareImages: squareImages||[], cellHashes, submittedBy: client.name,
-    submittedAt: new Date().toISOString(), status: 'pending'
-  };
-  saveUnsolved(unsolved);
-  // NOTE: Do NOT increment usage here — submitting an unsolved task for training
-  // is not a "solve". Only count actual solves (in /api/solved).
-  res.json({ ok: true, status: 'saved' });
-});
-app.post('/api/solved', (req, res) => {
-  const apiKey = req.headers['x-api-key'] || req.query.apikey;
-  if (!getClientInfo(apiKey)) return res.json({ ok: false });
-  incrementUsage(apiKey);
-  res.json({ ok: true });
-});
-// ── ADMIN API ─────────────────────────────────────────────────
-app.post('/admin/login', (req, res) => {
-  res.json({ ok: req.body.password === ADMIN_PASS, token: req.body.password === ADMIN_PASS ? ADMIN_PASS : null });
-});
-// Stats are cached briefly so the every-8s dashboard poll doesn't re-read
-// large data files from disk each time.
-app.get('/admin/stats', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
-  const now = Date.now();
-  if (_statsCache && (now - _statsCacheTime) < 15000) {
-    return res.json(_statsCache);   // serve cached (valid for 15s)
-  }
-  const unsolved = getUnsolved(); const trained = getTrained();
-  const clients = getClients(); const sqKB = getSquareKB();
-  const usage = getUsage(); const today = getTodayKey();
-  const complaints = getComplaints();
-  let tasksToday = 0;
-  for (const k of Object.keys(usage)) tasksToday += (usage[k][today] || 0);
-  _statsCache = {
-    unsolved: Object.values(unsolved).filter(e=>e.status==='pending').length,
-    trained: Object.keys(trained).length,
-    clients: Object.keys(clients).length,
-    squareKB: Object.keys(sqKB).length, tasksToday,
-    complaints: Object.keys(complaints).length
-  };
-  _statsCacheTime = now;
-  res.json(_statsCache);
-});
-app.get('/admin/unsolved', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
-  const unsolved = getUnsolved();
-  const all = Object.values(unsolved).filter(e=>e.status==='pending')
-    .sort((a,b)=>new Date(b.submittedAt)-new Date(a.submittedAt));
-  // Pagination: return `limit` items starting at `offset` (for Load More)
-  const offset = parseInt(req.query.offset) || 0;
-  const limit = parseInt(req.query.limit) || 60;
-  const list = all.slice(offset, offset + limit);
-  res.json({ list, count: list.length, total: all.length, offset, limit });
-});
-// Lightweight: just the current trained version number (tiny, fast).
-// Dashboard calls this first; only re-downloads trained data if version changed.
-app.get('/admin/trained-version', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
-  res.json({ version: getTrainedVersion() });
-});
-app.get('/admin/trained', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
-  const trained = getTrained();
-  const all = Object.values(trained).sort((a,b)=>new Date(b.trainedAt)-new Date(a.trainedAt));
-  // Pagination — sending all 800+ full base64 images at once is very slow,
-  // especially on a slow connection. Default to 60 per page.
-  const offset = parseInt(req.query.offset) || 0;
-  const limit = Math.min(parseInt(req.query.limit) || 60, 200);
-  const page = all.slice(offset, offset + limit);
-  res.json({ list: page, count: page.length, total: all.length, version: getTrainedVersion() });
-});
-// Fix duplicate/missing task numbers — renumber all trained tasks uniquely
-// by trained date (oldest = #1). Safe to run anytime.
-// ── COMPLAINTS ──────────────────────────────────────────────
-// Client reports a wrong solve. Captures task #, object, how it was solved,
-// and the original training so admin can compare & retrain.
-app.post('/api/complaint', (req, res) => {
-  const apiKey = req.headers['x-api-key'] || req.query.apikey;
-  const client = getClientInfo(apiKey);
-  if (!client) return res.status(401).json({ error: 'Invalid API key' });
-  const { imageKey, objectName, taskNumber, solvedSquares, noObjectSolved, imageSrc } = req.body;
-  if (!imageKey) return res.status(400).json({ error: 'Missing imageKey' });
-  const complaints = getComplaints();
-  const id = uuidv4();
-  complaints[id] = {
-    id,
-    imageKey,
-    objectName: objectName || '?',
-    taskNumber: taskNumber || null,
-    imageSrc: imageSrc || '',
-    solvedSquares: solvedSquares || [],
-    noObjectSolved: !!noObjectSolved,
-    clientName: client.name || '?',
-    clientEmail: client.email || '',
-    createdAt: new Date().toISOString(),
-    status: 'open'
-  };
-  saveComplaints(complaints);
-  res.json({ ok: true });
-});
-app.get('/admin/complaints', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
-  const trained = getTrained();
-  const squareKB = getSquareKB();
-  const list = Object.values(getComplaints())
-    .sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt))
-    .map(c => {
-      let t = trained[c.imageKey] || null;
-      if (!t && c.taskNumber) {
-        t = Object.values(trained).find(x => x.taskNumber === c.taskNumber) || null;
-      }
-      if (t) {
-        return {
-          ...c,
-          isTrained: true,
-          solveType: 'full',
-          trainedSquares: t.selectedSquares || [],
-          trainedNoObject: !!t.noObject,
-          gridRows: t.gridRows || c.gridRows || 3,
-          gridCols: t.gridCols || c.gridCols || 3,
-          taskNumber: t.taskNumber,
-          imageSrc: c.imageSrc || t.imageSrc || ''
-        };
-      }
-      return { ...c, isTrained: false, solveType: 'per-square' };
-    });
-  res.json({ list, count: list.length });
-});
-app.delete('/admin/complaints/:id', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
-  const complaints = getComplaints();
-  delete complaints[req.params.id];
-  saveComplaints(complaints);
-  res.json({ ok: true });
-});
-// Clear all resolved/all complaints
-app.post('/admin/complaints/clear', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
-  saveComplaints({});
-  res.json({ ok: true });
-});
-// ── COMPLAINTS END ──────────────────────────────────────────
-app.post('/admin/backfill-cells', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
-  const { imageKey, cellHashes } = req.body;
-  if (!imageKey || !Array.isArray(cellHashes)) return res.status(400).json({ error: 'Missing data' });
-  const kb = getKB(); const trained = getTrained();
-  let changed = false;
-  if (kb[imageKey])     { kb[imageKey].cellHashes = cellHashes; changed = true; }
-  if (trained[imageKey]){ trained[imageKey].cellHashes = cellHashes; changed = true; }
-  if (changed) { saveKB(kb); saveTrained(trained); }
-  res.json({ ok: true, changed });
-});
-app.get('/admin/needs-cells', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
-  const trained = getTrained();
-  const list = Object.values(trained)
-    .filter(t => t.imageSrc && !t.noObject && (!t.cellHashes || !t.cellHashes.length))
-    .map(t => ({ imageKey: t.imageKey, imageSrc: t.imageSrc, gridRows: t.gridRows||3, gridCols: t.gridCols||3 }));
-  res.json({ list, count: list.length });
-});
-// Tolerant content match: 98.5% bit similarity = same image (JPEG drift safe).
-function cellsMatch(a, b) {
-  if (!a || !b || a.length !== b.length) return false;
-  let total = 0, same = 0;
-  for (let i = 0; i < a.length; i++) {
-    const x = a[i] || '', y = b[i] || '';
-    const n = x.length < y.length ? x.length : y.length;
-    for (let j = 0; j < n; j++) { total++; if (x[j] === y[j]) same++; }
-    total += Math.abs(x.length - y.length);   // length diff counts as mismatch
-  }
-  if (!total) return false;
-  return (same / total) >= 0.985;
-}
-app.get('/admin/duplicates', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
-  if (_dupCache && (Date.now() - _dupCacheTime) < 20000) {
-    return res.json(_dupCache);
-  }
-  const trained = getTrained();
-  const unsolved = getUnsolved();
-  const items = [];
-  for (const t of Object.values(trained)) {
-    if (t.cellHashes && t.cellHashes.length && !t.noObject) {
-      items.push({ imageKey:t.imageKey, taskNumber:t.taskNumber||null, objectName:t.objectName||'?',
-        imageSrc:t.imageSrc||'', source:'trained', cellHashes:t.cellHashes });
-    }
-  }
-  for (const u of Object.values(unsolved)) {
-    if (u.cellHashes && u.cellHashes.length) {
-      items.push({ imageKey:u.imageKey, taskNumber:null, objectName:u.objectName||'?',
-        imageSrc:u.imageSrc||'', source:'unsolved', cellHashes:u.cellHashes });
-    }
-  }
-  const exactMap = {};
-  for (const it of items) {
-    const key = it.objectName + '|' + it.cellHashes.join('-');
-    (exactMap[key] = exactMap[key] || []).push(it);
-  }
-  const buckets = Object.values(exactMap);
-  const usedB = new Set();
-  const groups = [];
-  for (let i = 0; i < buckets.length; i++) {
-    if (usedB.has(i)) continue;
-    let group = buckets[i].slice();
-    const rep = buckets[i][0];
-    for (let j = i+1; j < buckets.length; j++) {
-      if (usedB.has(j)) continue;
-      const rep2 = buckets[j][0];
-      if (rep.objectName === rep2.objectName && cellsMatch(rep.cellHashes, rep2.cellHashes)) {
-        group = group.concat(buckets[j]);
-        usedB.add(j);
-      }
-    }
-    if (group.length > 1) {
-      usedB.add(i);
-      group.sort((a,b)=>(a.taskNumber||999999)-(b.taskNumber||999999));
-      groups.push(group.map(g => ({
-        imageKey:g.imageKey, taskNumber:g.taskNumber, objectName:g.objectName,
-        imageSrc:g.imageSrc, source:g.source
-      })));
-    }
-  }
-  const dupCount = groups.reduce((s,g)=>s+(g.length-1),0);
-  let missingCells = 0;
-  for (const t of Object.values(trained)) {
-    if (!t.noObject && (!t.cellHashes || !t.cellHashes.length)) missingCells++;
-  }
-  const result = { groups, groupCount: groups.length, duplicateCount: dupCount, missingCells };
-  _dupCache = result; _dupCacheTime = Date.now();
-  res.json(result);
-});
-// Delete specific tasks by imageKey (from trained AND/OR unsolved)
-app.post('/admin/delete-duplicates', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
-  const { imageKeys } = req.body;
-  if (!Array.isArray(imageKeys)) return res.status(400).json({ error: 'Missing imageKeys' });
-  const kb = getKB(); const trained = getTrained(); const unsolved = getUnsolved();
-  let removed = 0;
-  for (const k of imageKeys) {
-    let hit = false;
-    if (trained[k]) { delete trained[k]; hit = true; }
-    if (kb[k]) { delete kb[k]; hit = true; }
-    if (unsolved[k]) { delete unsolved[k]; hit = true; }
-    if (hit) removed++;
-  }
-  saveKB(kb); saveTrained(trained); saveUnsolved(unsolved);
-  res.json({ ok: true, removed });
-});
-app.get('/admin/kb-keys', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
-  const kb = getKB();
-  const out = {};
-  for (const [key, val] of Object.entries(kb)) {
-    out[key] = { objectName: val.objectName || '', noObject: !!val.noObject };
-  }
-  res.json({ kb: out, count: Object.keys(out).length });
-});
-// Cleanup: remove any unsolved entry whose imageKey is already trained.
-app.post('/admin/cleanup-unsolved', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
-  const trained = getTrained();
-  const unsolved = getUnsolved();
-  let removed = 0;
-  for (const k of Object.keys(unsolved)) {
-    if (trained[k]) { delete unsolved[k]; removed++; }
-  }
-  if (removed) saveUnsolved(unsolved);
-  res.json({ ok: true, removed });
-});
-app.post('/admin/renumber', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
-  const kb = getKB();
-  const trained = getTrained();
-  const sqKB = getSquareKB();
-  const entries = Object.values(trained)
-    .sort((a,b) => new Date(a.trainedAt||0) - new Date(b.trainedAt||0));
-  let n = 0;
-  const remap = {};
-  for (const e of entries) {
-    n++;
-    e.taskNumber = n;
-    trained[e.imageKey] = e;
-    if (kb[e.imageKey]) kb[e.imageKey].taskNumber = n;
-    if (e.objectName) remap[e.objectName] = n;
-  }
-  for (const h of Object.keys(sqKB)) {
-    const v = sqKB[h];
-    if (v && typeof v === 'object' && v.name && remap[v.name] !== undefined) {
-      v.num = remap[v.name];
-    }
-  }
-  saveKB(kb); saveTrained(trained); saveSquareKB(sqKB);
-  res.json({ ok: true, renumbered: n });
-});
-app.post('/admin/train', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
-  const { imageKey, imageSrc, objectName, taskText, selectedSquares,
-          noObject, gridRows, gridCols, squarePHashes } = req.body;
-  if (!imageKey) return res.status(400).json({ error: 'Missing imageKey' });
-  const kb = getKB();
-  const trained = getTrained();
-  let taskNumber;
-  if (kb[imageKey] && kb[imageKey].taskNumber) {
-    taskNumber = kb[imageKey].taskNumber;
-  } else if (trained[imageKey] && trained[imageKey].taskNumber) {
-    taskNumber = trained[imageKey].taskNumber;
-  } else {
-    let maxNum = 0;
-    for (const v of Object.values(kb)) if (v.taskNumber > maxNum) maxNum = v.taskNumber;
-    for (const v of Object.values(trained)) if (v.taskNumber > maxNum) maxNum = v.taskNumber;
-    taskNumber = maxNum + 1;
-  }
-  let cellHashes = null;
-  if (squarePHashes && Array.isArray(squarePHashes)) {
-    cellHashes = [];
-    for (const item of squarePHashes) {
-      if (item.index != null) cellHashes[item.index] = item.hash || '';
-    }
-  }
-  // DEDUPE BY CONTENT: same object + matching content → update existing, reuse number.
-  if (cellHashes && cellHashes.length && cellHashes.every(h=>h) && objectName) {
-    for (const [oldKey, v] of Object.entries(trained)) {
-      if (oldKey === imageKey) continue;
-      if (v.objectName === objectName &&
-          Array.isArray(v.cellHashes) && cellsMatch(v.cellHashes, cellHashes)) {
-        if (v.taskNumber) taskNumber = v.taskNumber;
-        delete trained[oldKey];
-        if (kb[oldKey]) delete kb[oldKey];
-      }
-    }
-  }
-  // kb.json is used only for solving (object + cellHashes + answer). It does NOT
-  // need the image — storing the big base64 here too doubled the file size and
-  // made every save slow enough to hit Railway's 502 timeout. The image is kept
-  // in trained.json (for the dashboard). This keeps kb.json small and saves fast.
-  kb[imageKey] = { objectName:objectName||'',
-    noObject:noObject||false, selectedSquares:selectedSquares||[],
-    gridRows:gridRows||3, gridCols:gridCols||3, cellHashes,
-    taskNumber, trainedAt:new Date().toISOString() };
-  saveKB(kb);
-  const unsolved = getUnsolved();
-  if (unsolved[imageKey]) { delete unsolved[imageKey]; saveUnsolved(unsolved); }
-  trained[imageKey] = { imageKey, imageSrc, objectName, taskText,
-    selectedSquares:selectedSquares||[], noObject:noObject||false,
-    gridRows:gridRows||3, gridCols:gridCols||3, cellHashes,
-    taskNumber, trainedAt:new Date().toISOString() };
-  saveTrained(trained);
-  res.json({ ok: true, taskNumber, version: getTrainedVersion() });
-});
-app.delete('/admin/trained/:key', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
-  const key = decodeURIComponent(req.params.key);
-  const kb = getKB(); const trained = getTrained();
-  const objName = (kb[key]||{}).objectName;
-  delete kb[key]; delete trained[key];
-  saveKB(kb); saveTrained(trained);
-  if (objName) {
-    const sqKB = getSquareKB();
-    let changed = false;
-    for (const h of Object.keys(sqKB)) {
-      const v = sqKB[h];
-      if (v && typeof v === 'object' && v.name === objName) { delete sqKB[h]; changed = true; }
-    }
-    if (changed) saveSquareKB(sqKB);
-  }
-  const unsolved = getUnsolved();
-  if (unsolved[key]) { unsolved[key].status = 'unsolved'; saveUnsolved(unsolved); }
-  res.json({ ok: true });
-});
-app.get('/admin/clients', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
-  const clients = getClients(); const usage = getUsage(); const today = getTodayKey();
-  for (const k of Object.keys(clients)) {
-    clients[k].usedToday = (usage[k]||{})[today]||0;
-    // Add days-left + expired flag so the dashboard can show plan status.
-    if (clients[k].expiresAt) {
-      const ms = new Date(clients[k].expiresAt) - new Date();
-      clients[k].daysLeft = Math.max(0, Math.floor(ms / 86400000));
-      clients[k].expired = ms <= 0;
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SquareNet Admin</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#09081a;--card:#111028;--panel:#16143a;--border:#2a2560;--accent:#7c3aed;--text:#e0daf5;--muted:#6b6890;--green:#22c55e;--red:#ef4444;--amber:#f59e0b}
+body{background:var(--bg);color:var(--text);font-family:'Segoe UI',sans-serif;font-size:13px;height:100vh;display:flex;flex-direction:column}
+
+/* LOGIN */
+.login-wrap{flex:1;display:flex;align-items:center;justify-content:center}
+.login-box{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:36px;width:320px;text-align:center}
+.login-box h1{font-size:20px;font-weight:700;background:linear-gradient(135deg,#7c3aed,#3b82f6);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;margin-bottom:4px}
+.login-box p{color:var(--muted);font-size:12px;margin-bottom:20px}
+input{width:100%;background:var(--panel);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:10px 12px;font-size:13px;outline:none;margin-bottom:10px}
+input:focus{border-color:var(--accent)}
+.login-err{color:var(--red);font-size:12px;margin-bottom:8px}
+
+/* LAYOUT */
+.app{display:none;flex-direction:column;flex:1;overflow:hidden}
+.app.show{display:flex}
+.header{background:var(--card);border-bottom:1px solid var(--border);padding:12px 20px;display:flex;align-items:center;gap:12px;flex-shrink:0}
+.header h1{font-size:15px;font-weight:700;background:linear-gradient(135deg,#7c3aed,#3b82f6);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;flex:1}
+.hstats{display:flex;gap:16px}
+.hstat{text-align:center}
+.hstat-val{font-size:18px;font-weight:700;color:#a78bfa;line-height:1}
+.hstat-lbl{font-size:9px;color:var(--muted)}
+
+/* TABS */
+.tabs{background:var(--card);border-bottom:1px solid var(--border);display:flex;padding:0 20px;flex-shrink:0}
+.tab{padding:10px 16px;cursor:pointer;font-size:13px;font-weight:500;color:var(--muted);border-bottom:2px solid transparent}
+.tab.active{color:#a78bfa;border-bottom-color:var(--accent)}
+
+/* PANES */
+.panes{flex:1;overflow:hidden;display:flex;flex-direction:column}
+.pane{display:none;flex:1;overflow:hidden;flex-direction:column}
+.pane.active{display:flex}
+.toolbar{background:var(--card);border-bottom:1px solid var(--border);padding:10px 20px;display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap}
+.search{background:var(--panel);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:7px 12px;font-size:12px;width:180px;outline:none}
+.search:focus{border-color:var(--accent)}
+.spacer{flex:1}
+
+/* BUTTONS */
+.btn{padding:7px 14px;border-radius:8px;border:none;cursor:pointer;font-size:12px;font-weight:600;transition:opacity .15s}
+.btn:hover{opacity:.85}
+.btn-primary{background:linear-gradient(135deg,#7c3aed,#3b82f6);color:#fff}
+.btn-ghost{background:var(--panel);border:1px solid var(--border);color:#a78bfa}
+.btn-danger{background:var(--red);color:#fff}
+.btn-green{background:var(--green);color:#fff}
+.btn-amber{background:var(--amber);color:#000}
+.btn-red{background:#ef4444;color:#fff}
+.btn-sm{padding:4px 10px;font-size:11px}
+
+/* GRIDS */
+.grid-scroll{flex:1;overflow-y:auto;padding:14px 20px}
+.grid-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:12px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden;cursor:pointer;transition:border-color .15s}
+.card:hover{border-color:var(--accent)}
+.card-img{width:100%;aspect-ratio:1;background:#0a0916;position:relative;overflow:hidden}
+.card-img img{width:100%;height:100%;object-fit:cover}
+.badge{position:absolute;top:6px;left:6px;background:rgba(124,58,237,.85);color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:20px}
+.badge2{position:absolute;top:6px;right:6px;background:rgba(34,197,94,.85);color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:20px}
+.mini-grid{position:absolute;inset:0;display:grid;pointer-events:none}
+.mini-cell{border:1px solid rgba(255,255,255,.15)}
+.mini-cell.mini-sel{background:rgba(34,197,94,.45);border:2px solid #22c55e;box-shadow:inset 0 0 0 1px rgba(255,255,255,.4)}
+.card-info{padding:8px 10px 10px}
+.card-obj{font-size:12px;font-weight:700;color:#c4b5fd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card-meta{font-size:10px;color:var(--muted);margin-top:2px}
+.no-items{grid-column:1/-1;text-align:center;padding:50px;color:var(--muted)}
+
+/* MODAL */
+.overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:100;align-items:center;justify-content:center;padding:20px}
+.overlay.open{display:flex}
+.modal{background:var(--card);border:1px solid var(--border);border-radius:16px;width:100%;max-width:600px;max-height:90vh;display:flex;flex-direction:column;overflow:hidden}
+.modal-head{padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
+.modal-head h2{font-size:14px;font-weight:700;color:#a78bfa;flex:1}
+.close-btn{background:none;border:none;cursor:pointer;color:var(--muted);font-size:22px}
+.modal-body{flex:1;overflow-y:auto;padding:16px}
+.modal-foot{padding:12px 20px;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px}
+.task-lbl{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:12px}
+.task-lbl .l{font-size:10px;color:var(--muted);margin-bottom:3px}
+.task-lbl .v{font-size:14px;font-weight:700;color:#c4b5fd;text-transform:capitalize}
+.grid-ctrl{display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap}
+.grid-ctrl label{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:5px}
+.grid-ctrl input[type=number]{width:48px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:4px 7px;font-size:12px;outline:none}
+.sel-count{font-size:12px;color:#a78bfa;font-weight:600}
+.img-wrap{position:relative;display:block;border:2px solid var(--border);border-radius:10px;overflow:hidden;margin-bottom:10px;max-width:480px;margin-left:auto;margin-right:auto}
+.img-wrap img{display:block;width:100%;height:auto}
+.grid-ov{position:absolute;top:0;left:0;width:100%;height:100%;display:grid;cursor:pointer}
+.cell{border:1px solid rgba(255,255,255,.1);transition:background .1s;position:relative}
+.cell:hover{background:rgba(124,58,237,.25)!important}
+.cell.sel{background:rgba(124,58,237,.55)!important;border-color:#a78bfa}
+.cell.sel::after{content:'✓';position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#a78bfa;font-size:14px;font-weight:900;pointer-events:none}
+
+/* CLIENTS */
+.client-list{flex:1;overflow-y:auto;padding:14px 20px}
+.client-row{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px 16px;margin-bottom:8px}
+.client-top{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.client-name{font-size:13px;font-weight:700;color:#c4b5fd;flex:1}
+.client-key{font-size:11px;color:var(--muted);font-family:monospace;background:var(--panel);padding:3px 8px;border-radius:6px}
+.client-plan{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px}
+.cp-item{background:var(--panel);border-radius:6px;padding:6px 10px;text-align:center}
+.cp-val{font-size:15px;font-weight:700;color:#a78bfa}
+.cp-lbl{font-size:9px;color:var(--muted)}
+.plan-bar{height:4px;background:#2d2558;border-radius:2px;overflow:hidden;margin-bottom:8px}
+.plan-fill{height:100%;background:linear-gradient(90deg,#7c3aed,#3b82f6);border-radius:2px}
+.client-actions{display:flex;gap:6px;flex-wrap:wrap}
+.plan-input{width:80px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:5px 8px;font-size:12px;outline:none}
+
+/* TOAST */
+.toast{position:fixed;bottom:20px;right:20px;z-index:999;padding:12px 16px;border-radius:10px;font-size:13px;color:#fff;box-shadow:0 4px 20px rgba(0,0,0,.4);animation:sIn .3s}
+@keyframes sIn{from{transform:translateX(110%);opacity:0}to{transform:translateX(0);opacity:1}}
+.tok{background:linear-gradient(135deg,#16a34a,#15803d)}
+.terr{background:linear-gradient(135deg,#dc2626,#991b1b)}
+.tinf{background:linear-gradient(135deg,#5c35d4,#3b82f6)}
+
+::-webkit-scrollbar{width:5px}
+::-webkit-scrollbar-track{background:var(--bg)}
+::-webkit-scrollbar-thumb{background:#2d2558;border-radius:3px}
+</style>
+</head>
+<body>
+
+<!-- LOGIN -->
+<div class="login-wrap" id="login-wrap">
+  <div class="login-box">
+    <h1>🔲 SquareNet Admin</h1>
+    <p>Central Training Dashboard</p>
+    <div class="login-err" id="login-err"></div>
+    <input type="password" id="admin-pass" placeholder="Admin Password">
+    <button class="btn btn-primary" style="width:100%;padding:10px" onclick="doLogin()">Login</button>
+  </div>
+</div>
+
+<!-- APP -->
+<div class="app" id="app">
+  <div class="header">
+    <span>🔲</span>
+    <h1>SquareNet Admin Dashboard</h1>
+    <div class="hstats">
+      <div class="hstat"><div class="hstat-val" id="hs-unsolved">0</div><div class="hstat-lbl">Unsolved</div></div>
+      <div class="hstat"><div class="hstat-val" id="hs-trained">0</div><div class="hstat-lbl">Trained</div></div>
+      <div class="hstat"><div class="hstat-val" id="hs-clients">0</div><div class="hstat-lbl">Clients</div></div>
+      <div class="hstat"><div class="hstat-val" id="hs-today">0</div><div class="hstat-lbl">Today</div></div>
+    </div>
+    <button class="btn btn-ghost btn-sm" onclick="loadStats()">🔄</button>
+    <button class="btn btn-danger btn-sm" onclick="doLogout()">Logout</button>
+  </div>
+
+  <div class="tabs">
+    <div class="tab active" data-tab="unsolved">📥 Unsolved</div>
+    <div class="tab" data-tab="trained">✅ Trained</div>
+    <div class="tab" data-tab="clients">👥 Clients</div>
+    <div class="tab" data-tab="complaints">⚠️ Complaints <span id="comp-badge" style="display:none;background:#dc2626;color:#fff;border-radius:10px;padding:0 6px;font-size:10px;margin-left:4px"></span></div>
+    <div class="tab" data-tab="duplicates">👯 Duplicates <span id="dup-badge" style="display:none;background:#f59e0b;color:#000;border-radius:10px;padding:0 6px;font-size:10px;margin-left:4px"></span></div>
+  </div>
+
+  <div class="panes">
+    <!-- UNSOLVED -->
+    <div class="pane active" id="pane-unsolved">
+      <div class="toolbar">
+        <input class="search" id="search-unsolved" placeholder="🔍 Search..." oninput="renderUnsolved()">
+        <div class="spacer"></div>
+        <span id="unsolved-count" style="font-size:12px;color:var(--muted);margin-right:10px"></span>
+        <button class="btn btn-ghost btn-sm" onclick="loadUnsolved()">🔄 Refresh</button>
+      </div>
+      <div class="grid-scroll">
+        <div class="grid-list" id="unsolved-list"><div class="no-items">Loading...</div></div>
+        <div style="text-align:center;padding:14px">
+          <button class="btn btn-ghost" id="load-more-btn" onclick="loadMoreUnsolved()" style="display:none">⬇ Load More</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- TRAINED -->
+    <div class="pane" id="pane-trained">
+      <div class="toolbar">
+        <input class="search" id="search-trained" placeholder="🔍 Search name ya #number..." oninput="onTrainedSearch()">
+        <button class="btn btn-sm" id="solving-toggle" onclick="toggleSolving()" style="background:#22c55e;color:#fff">⏳ Solving: ...</button>
+        <div class="spacer"></div>
+        <button class="btn btn-amber btn-sm" onclick="renumberTasks()">🔢 Fix Numbers</button>
+        <button class="btn btn-green btn-sm" onclick="backfillCells()">🔒 Secure All Tasks</button>
+        <button class="btn btn-ghost btn-sm" onclick="loadTrained(true)">🔄 Refresh</button>
+      </div>
+      <div class="grid-scroll">
+        <div class="grid-list" id="trained-list"><div class="no-items">Loading...</div></div>
+        <div style="text-align:center;padding:14px">
+          <button class="btn btn-ghost" id="trained-more-btn" onclick="loadMoreTrained()" style="display:none">⬇ Load More</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- CLIENTS -->
+    <div class="pane" id="pane-clients">
+      <div class="toolbar">
+        <input id="new-name" class="search" placeholder="Client name (e.g. Ali-PC1)">
+        <input id="new-plan" class="search" placeholder="Daily plan (e.g. 500)" style="width:130px">
+        <button class="btn btn-primary btn-sm" onclick="createClient()">➕ Add Client</button>
+        <div class="spacer"></div>
+        <button class="btn btn-ghost btn-sm" onclick="loadClients()">🔄 Refresh</button>
+      </div>
+      <div class="client-list" id="client-list"><div class="no-items">Loading...</div></div>
+    </div>
+
+    <!-- COMPLAINTS -->
+    <div class="pane" id="pane-complaints">
+      <div class="toolbar">
+        <span style="color:var(--muted);font-size:13px">Client-reported wrong solves</span>
+        <div class="spacer"></div>
+        <button class="btn btn-red btn-sm" onclick="clearComplaints()">🗑 Clear All</button>
+        <button class="btn btn-ghost btn-sm" onclick="loadComplaints()">🔄 Refresh</button>
+      </div>
+      <div class="grid-scroll">
+        <div id="complaints-list"><div class="no-items">Loading...</div></div>
+      </div>
+    </div>
+
+    <!-- DUPLICATES -->
+    <div class="pane" id="pane-duplicates">
+      <div class="toolbar">
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer">
+          <input type="checkbox" id="dup-select-all" onchange="toggleDupSelectAll()"> Select all
+        </label>
+        <button class="btn btn-danger btn-sm" id="dup-del-btn" style="display:none" onclick="deleteSelectedDups()">🗑 Delete Selected</button>
+        <div class="spacer"></div>
+        <span id="dup-count" style="font-size:12px;color:var(--muted);margin-right:10px"></span>
+        <button class="btn btn-ghost btn-sm" onclick="loadDuplicates()">🔄 Scan</button>
+      </div>
+      <div class="grid-scroll">
+        <div id="duplicates-list"><div class="no-items">Press "Scan" to find duplicates</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- TRAIN MODAL -->
+<div class="overlay" id="modal">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="modal-title">Train</h2>
+      <button class="close-btn" onclick="closeModal()">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="task-lbl"><div class="l">Find Object:</div><div class="v" id="modal-obj">—</div></div>
+      <div class="grid-ctrl">
+        <label>Rows: <input type="number" id="g-rows" value="3" min="2" max="10" onchange="buildGrid()"></label>
+        <label>Cols: <input type="number" id="g-cols" value="3" min="2" max="10" onchange="buildGrid()"></label>
+        <button class="btn btn-ghost btn-sm" onclick="buildGrid()">Apply</button>
+        <div class="spacer"></div>
+        <span class="sel-count" id="sel-count">0 selected</span>
+        <button class="btn btn-ghost btn-sm" onclick="clearSel()">Clear</button>
+      </div>
+      <div class="img-wrap"><img id="modal-img" src="" alt=""><div class="grid-ov" id="grid-ov"></div></div>
+      <div style="font-size:11px;color:var(--muted)">💡 Object wale squares click karo</div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-amber" onclick="saveTrain(true)">🚫 Not Found</button>
+      <button class="btn btn-red" id="modal-delete-btn" onclick="deleteTrained()" style="display:none">🗑 Delete</button>
+      <div class="spacer"></div>
+      <button class="btn btn-ghost" onclick="closeModal()">Skip</button>
+      <button class="btn btn-green" onclick="saveTrain(false)">💾 Save & Train</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// Server URL is hardcoded
+const SERVER = location.origin; // same origin since dashboard is served from server
+let PASS = '';
+let unsolvedData=[], trainedData=[], clientsData={};
+
+let modalEntry=null, selectedCells=new Set(), taskCounter=0;
+
+// ── LOGIN ──────────────────────────────────────────────────────
+async function doLogin() {
+  PASS = document.getElementById('admin-pass').value;
+  try {
+    const r = await api('POST','/admin/login',{password:PASS});
+    if(r.ok){
+      localStorage.setItem('sn_admin_pass', PASS);
+      document.getElementById('login-wrap').style.display='none';
+      document.getElementById('app').classList.add('show');
+      initApp();
     } else {
-      clients[k].daysLeft = null; clients[k].expired = false;
+      document.getElementById('login-err').textContent='❌ Galat password';
     }
+  } catch(e){ document.getElementById('login-err').textContent='❌ Error: '+e.message; }
+}
+
+function doLogout(){
+  localStorage.removeItem('sn_admin_pass');
+  PASS=''; location.reload();
+}
+
+window.onload=()=>{
+  const saved=localStorage.getItem('sn_admin_pass');
+  if(saved){ PASS=saved; document.getElementById('admin-pass').value=saved; doLogin(); }
+  document.getElementById('admin-pass').addEventListener('keypress',e=>{ if(e.key==='Enter') doLogin(); });
+};
+
+// ── API ─────────────────────────────────────────────────────────
+async function api(method,path,body){
+  const r=await fetch(SERVER+path,{
+    method, headers:{'Content-Type':'application/json','x-admin-pass':PASS},
+    body: body?JSON.stringify(body):undefined
+  });
+  return r.json();
+}
+
+// ── INIT ────────────────────────────────────────────────────────
+function initApp(){
+  document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{
+    document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+    document.querySelectorAll('.pane').forEach(x=>x.classList.remove('active'));
+    t.classList.add('active');
+    document.getElementById('pane-'+t.dataset.tab).classList.add('active');
+    // Trained loads ONCE — only first time the tab is opened. After that it's cached.
+    if(t.dataset.tab==='trained') loadTrained();
+    if(t.dataset.tab==='clients') loadClients();
+    if(t.dataset.tab==='complaints') loadComplaints();
+    if(t.dataset.tab==='duplicates') loadDuplicates();
+  }));
+  loadStats(); loadUnsolved(); loadSolvingStatus();
+  // Note: full trained list loads only when you actually search (in onTrainedSearch),
+  // NOT in the background — preloading 3000+ tasks with images was slowing the dashboard.
+  // Auto-refresh ONLY the unsolved tab. Skip while the train modal is open so
+  // training stays smooth (no list reload / image re-fetch mid-train).
+  setInterval(()=>{
+    const modalOpen = document.getElementById('modal').classList.contains('open');
+    if(modalOpen) return;   // training in progress — don't interrupt
+    loadStats();
+    const activeTab = document.querySelector('.tab.active')?.dataset.tab;
+    if(activeTab==='unsolved') loadUnsolved();
+    // Duplicate badge is refreshed only when the Duplicates tab is opened (see
+    // tab handler), NOT on every cycle — the full scan is heavy and was slowing
+    // the whole dashboard.
+    if(activeTab==='duplicates') updateDupBadge();
+  }, 8000);
+}
+
+async function loadStats(){
+  try{
+    const d=await api('GET','/admin/stats');
+    document.getElementById('hs-unsolved').textContent=d.unsolved||0;
+    document.getElementById('hs-trained').textContent=d.trained||0;
+    document.getElementById('hs-clients').textContent=d.clients||0;
+    document.getElementById('hs-today').textContent=d.tasksToday||0;
+    taskCounter=d.trained||0;
+    // Complaints badge on the tab
+    const cb=document.getElementById('comp-badge');
+    if(cb){ const n=d.complaints||0; if(n){cb.style.display='inline-block';cb.textContent=n;}else{cb.style.display='none';} }
+  }catch(e){}
+}
+
+// Track keys we just trained so auto-refresh doesn't bring them back (flicker fix)
+window._recentlyTrained = window._recentlyTrained || new Set();
+
+// ── UNSOLVED ────────────────────────────────────────────────────
+async function loadUnsolved(){
+  // Fresh load — reset to first page
+  try{
+    const d=await api('GET','/admin/unsolved?offset=0&limit=60');
+    let list=d.list||[];
+    // Remove any task we just trained (server may still show it as pending briefly)
+    if(window._recentlyTrained.size){
+      list=list.filter(e=>!window._recentlyTrained.has(e.imageKey));
+    }
+    unsolvedData=list;
+    window._unsolvedTotal=Math.max(0,(d.total||0)-window._recentlyTrained.size);
+    window._unsolvedOffset=unsolvedData.length;
+    renderUnsolved();
+    updateLoadMore();
+  }catch(e){}
+}
+
+async function loadMoreUnsolved(){
+  try{
+    const offset=window._unsolvedOffset||0;
+    const d=await api('GET','/admin/unsolved?offset='+offset+'&limit=60');
+    unsolvedData=unsolvedData.concat(d.list||[]);
+    window._unsolvedOffset=unsolvedData.length;
+    renderUnsolved();
+    updateLoadMore();
+  }catch(e){}
+}
+
+function updateLoadMore(){
+  const total=window._unsolvedTotal||0;
+  const shown=unsolvedData.length;
+  const btn=document.getElementById('load-more-btn');
+  const cnt=document.getElementById('unsolved-count');
+  if(cnt) cnt.textContent = `${shown} / ${total}`;
+  if(btn) btn.style.display = (shown < total) ? 'inline-flex' : 'none';
+}
+
+function renderUnsolved(){
+  const q=document.getElementById('search-unsolved').value.toLowerCase().trim();
+  const items=unsolvedData.filter(e=>{
+    if(!q) return true;
+    const obj=(e.objectName||'').toLowerCase();
+    const num=String(e.taskNumber||'');
+    return obj.includes(q) || num===q.replace('#','') || num.includes(q.replace('#',''));
+  });
+  const el=document.getElementById('unsolved-list');
+  if(!items.length){el.innerHTML='<div class="no-items">🎉 Koi unsolved nahi!</div>';return;}
+  el.innerHTML=items.map((e,i)=>`
+    <div class="card" onclick='openModal(${JSON.stringify(e).replace(/'/g,"&#39;")})'>
+      <div class="card-img"><img src="${e.imageSrc||''}" loading="lazy"><div class="badge">${i+1}</div></div>
+      <div class="card-info">
+        <div class="card-obj">🔍 ${e.objectName||'?'}</div>
+        <div class="card-meta">${e.submittedBy||'unknown'} • ${fmtDate(e.submittedAt)}</div>
+      </div>
+    </div>`).join('');
+}
+
+// ── TRAINED ─────────────────────────────────────────────────────
+
+async function loadTrained(force){
+  try{
+    if(force){ window._allTrainedLoaded=false; window._allTrained=null; }  // refresh search cache
+    // Load first page only (fast). More load on demand via "Load More".
+    const d=await api('GET','/admin/trained?offset=0&limit=60');
+    trainedData=d.list||[];
+    window._trainedTotal=d.total||0;
+    window._trainedOffset=trainedData.length;
+    window._trainedLoaded=true;
+    renderTrained();
+    updateTrainedMore();
+  }catch(e){}
+}
+async function loadMoreTrained(){
+  try{
+    const offset=window._trainedOffset||0;
+    const d=await api('GET','/admin/trained?offset='+offset+'&limit=60');
+    trainedData=trainedData.concat(d.list||[]);
+    window._trainedOffset=trainedData.length;
+    renderTrained();
+    updateTrainedMore();
+  }catch(e){}
+}
+function updateTrainedMore(){
+  const total=window._trainedTotal||0, shown=trainedData.length;
+  let btn=document.getElementById('trained-more-btn');
+  if(btn) btn.style.display = (shown<total)?'inline-flex':'none';
+}
+
+// Compute & store per-cell hashes for ALL old tasks that don't have them yet,
+// so every trained task gets strict exact-cell verification (zero wrong solves).
+async function backfillCells(){
+  if(!confirm('Secure all tasks?\n\nThis adds exact cell-verification to every old task so they can NEVER be solved wrongly. It processes all images in your browser — may take a few minutes for many tasks. You can keep using the dashboard after it finishes.')) return;
+  let needs=[];
+  try{
+    const d=await api('GET','/admin/needs-cells');
+    needs=d.list||[];
+  }catch(e){ toast('Error loading list','err'); return; }
+
+  if(!needs.length){ toast('✅ All tasks already secured!','ok'); return; }
+
+  toast(`Securing ${needs.length} tasks... please wait`,'inf');
+  let done=0, failed=0;
+  for(const t of needs){
+    try{
+      // Build ordered cell hashes from the stored image (no "isObject" needed here)
+      const cells=await buildCellHashesOnly(t.imageSrc, t.gridRows||3, t.gridCols||3);
+      if(cells && cells.length){
+        const r=await api('POST','/admin/backfill-cells',{ imageKey:t.imageKey, cellHashes:cells });
+        if(r.ok) done++; else failed++;
+      } else failed++;
+    }catch(e){ failed++; }
+    // Progress toast every 25
+    if((done+failed)%25===0){ toast(`Securing... ${done+failed}/${needs.length}`,'inf'); }
   }
-  res.json({ clients });
-});
-app.post('/admin/clients', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
-  const { name, plan, apiKey: providedKey, expiresAt, durationDays } = req.body;
-  if (!name) return res.status(400).json({ error: 'Name required' });
-  const clients = getClients();
-  const apiKey = providedKey || ('sn_' + uuidv4().replace(/-/g,'').substring(0,24));
-  // Expiry: use the exact date the portal sends, else compute from durationDays
-  // (default 30) starting NOW (client's buy moment). This is what stops solving
-  // when the plan runs out.
-  let exp = expiresAt || null;
-  if (!exp) {
-    const d = new Date();
-    d.setDate(d.getDate() + (durationDays || 30));
-    exp = d.toISOString();
+  toast(`✅ Secured ${done} tasks${failed?(', '+failed+' failed'):''}`,'ok');
+  // Refresh cache so the new hashes are reflected
+  window._trainedLoaded=false;
+  loadTrained(true);
+}
+
+// Build just the ordered array of cell pHashes for an image (index 0..n)
+function buildCellHashesOnly(src,rows,cols){
+  return new Promise(resolve=>{
+    const img=new Image();
+    img.onload=()=>{
+      const cw=Math.floor(img.width/cols),ch=Math.floor(img.height/rows);
+      const out=[];
+      for(let r=0;r<rows;r++) for(let c=0;c<cols;c++){
+        const canvas=document.createElement('canvas'); canvas.width=8; canvas.height=8;
+        const ctx=canvas.getContext('2d',{willReadFrequently:true});
+        let hash='';
+        try{
+          ctx.drawImage(img,c*cw,r*ch,cw,ch,0,0,8,8);
+          const data=ctx.getImageData(0,0,8,8).data;
+          const g=[]; for(let i=0;i<data.length;i+=4) g.push(data[i]*.299+data[i+1]*.587+data[i+2]*.114);
+          const avg=g.reduce((a,b)=>a+b,0)/g.length;
+          hash=g.map(v=>v>avg?'1':'0').join('');
+        }catch(e){}
+        out.push(hash);
+      }
+      resolve(out);
+    };
+    img.onerror=()=>resolve(null);
+    img.src=src;
+  });
+}
+
+// ── DUPLICATES (display only — delete is manual per item) ──────
+// Lightweight: just fetch the duplicate count and update the 👯 badge. Runs on
+// load and on the auto-refresh timer so duplicates are visible without opening
+// the tab or pressing Scan.
+async function updateDupBadge(){
+  try{
+    const data=await api('GET','/admin/duplicates');
+    const badge=document.getElementById('dup-badge');
+    if(badge){
+      if(data.duplicateCount){ badge.style.display='inline-block'; badge.textContent=data.duplicateCount; }
+      else { badge.style.display='none'; }
+    }
+    // Cache so opening the tab is instant.
+    window._dupGroups=data.groups||[];
+    window._dupData=data;
+  }catch(e){}
+}
+async function loadDuplicates(){
+  const el=document.getElementById('duplicates-list');
+  // If we already have a recent scan (from the background badge poll), render it
+  // instantly instead of showing "Scanning..." and waiting for a fresh scan.
+  if(window._dupData){
+    renderDuplicates(window._dupData);
+  } else {
+    el.innerHTML='<div class="no-items">Scanning...</div>';
   }
-  clients[apiKey] = { name, apiKey, plan:plan||1000, active:true,
-    createdAt:new Date().toISOString(), expiresAt: exp, lastSeen:null };
-  saveClients(clients);
-  res.json({ ok:true, apiKey, name, expiresAt: exp });
-});
-app.patch('/admin/clients/:apiKey', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
-  const clients = getClients();
-  if (!clients[req.params.apiKey]) return res.status(404).json({ error: 'Not found' });
-  const { plan, active, name, expiresAt, durationDays, renew } = req.body;
-  if (plan !== undefined) clients[req.params.apiKey].plan = plan;
-  if (active !== undefined) clients[req.params.apiKey].active = active;
-  if (name !== undefined) clients[req.params.apiKey].name = name;
-  // Renew/extend expiry. If an exact date is sent, use it. If renew+durationDays,
-  // add that many days from NOW (fresh 30-day plan on renewal).
-  if (expiresAt !== undefined) clients[req.params.apiKey].expiresAt = expiresAt;
-  else if (renew || durationDays) {
-    const d = new Date();
-    d.setDate(d.getDate() + (durationDays || 30));
-    clients[req.params.apiKey].expiresAt = d.toISOString();
-    clients[req.params.apiKey].active = true;   // renewing re-activates
+  let data;
+  try{ data=await api('GET','/admin/duplicates'); }
+  catch(e){ if(!window._dupData) el.innerHTML='<div class="no-items">Error scanning</div>'; return; }
+  window._dupData=data;
+  renderDuplicates(data);
+}
+function renderDuplicates(data){
+  const el=document.getElementById('duplicates-list');
+  window._dupGroups=data.groups||[];
+  const badge=document.getElementById('dup-badge');
+  const cnt=document.getElementById('dup-count');
+  let txt = data.duplicateCount ? `${data.duplicateCount} extra copies in ${data.groupCount} groups` : '';
+  if(data.missingCells){ txt += (txt?'  •  ':'') + `⚠️ ${data.missingCells} tasks not scannable — press "Secure All Tasks" in Trained tab first`; }
+  if(cnt) cnt.textContent = txt;
+  if(badge){ if(data.duplicateCount){badge.style.display='inline-block';badge.textContent=data.duplicateCount;}else{badge.style.display='none';} }
+
+  if(!data.groups || !data.groups.length){
+    el.innerHTML='<div class="no-items">✅ No duplicates found</div>';
+    return;
   }
-  saveClients(clients);
-  res.json({ ok: true, expiresAt: clients[req.params.apiKey].expiresAt });
-});
-app.delete('/admin/clients/:apiKey', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
-  const clients = getClients();
-  delete clients[req.params.apiKey];
-  saveClients(clients);
-  res.json({ ok: true });
-});
-// Free disk space by clearing the OLD, UNUSED squareKB (per-square pHash data).
-// Solving now uses content-matching (cellHashes) via /api/solve — squareKB is not
-// used for matching at all. This ONLY empties square_kb.json; it does NOT touch
-// trained.json, kb.json, solving, or any task. 100% safe for trained data.
-app.post('/admin/clear-squarekb', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
-  const before = Object.keys(getSquareKB()).length;
-  saveSquareKB({});
-  _squareKBCache = {};
-  res.json({ ok: true, cleared: before });
-});
-// One-time: strip images (imageSrc) out of kb.json to shrink it. kb.json is only
-// used for solving and doesn't need images (they live in trained.json). Run once
-// after deploy to fix the slow-save / 502 problem on an already-bloated kb.json.
-app.post('/admin/shrink-kb', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
-  const kb = getKB();
-  let stripped = 0;
-  for (const k of Object.keys(kb)) {
-    if (kb[k] && kb[k].imageSrc) { delete kb[k].imageSrc; stripped++; }
+
+  el.innerHTML=data.groups.map((g,gi)=>{
+    const cards=g.map((t,ti)=>`
+      <div style="background:var(--panel);border:1px solid ${ti===0?'#22c55e':'var(--border)'};border-radius:10px;padding:8px;text-align:center;width:150px">
+        <img src="${t.imageSrc||''}" style="width:130px;height:130px;object-fit:cover;border-radius:6px" loading="lazy">
+        <div style="font-size:11px;color:#c4b5fd;margin-top:4px">#${t.taskNumber||'?'} ${t.objectName||''}</div>
+        <div style="font-size:9px;color:var(--muted)">${t.source}${ti===0?' • KEEP':''}</div>
+        ${ti===0
+          ? '<div style="font-size:10px;color:#22c55e;margin-top:6px">✅ Keeper (safe)</div>'
+          : `<label style="display:flex;align-items:center;justify-content:center;gap:5px;margin-top:6px;font-size:11px;color:#fca5a5;cursor:pointer">
+               <input type="checkbox" class="dup-check" value="${t.imageKey}" data-source="${t.source}" onchange="updateDupSelCount()"> Select
+             </label>`}
+      </div>`).join('');
+    return `
+      <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:12px">
+        <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Group ${gi+1} — "${g[0].objectName}" (${g.length} copies)</div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-start">${cards}</div>
+      </div>`;
+  }).join('');
+  updateDupSelCount();
+}
+
+// How many duplicate copies are currently checked
+function updateDupSelCount(){
+  const n=document.querySelectorAll('.dup-check:checked').length;
+  const btn=document.getElementById('dup-del-btn');
+  if(btn){ btn.style.display = n ? 'inline-flex' : 'none'; btn.textContent = '🗑 Delete Selected ('+n+')'; }
+  // select-all checkbox state
+  const all=document.querySelectorAll('.dup-check').length;
+  const sa=document.getElementById('dup-select-all');
+  if(sa){ sa.checked = (all>0 && n===all); }
+}
+
+// Tick/untick every duplicate copy
+function toggleDupSelectAll(){
+  const on=document.getElementById('dup-select-all').checked;
+  document.querySelectorAll('.dup-check').forEach(c=>{ c.checked=on; });
+  updateDupSelCount();
+}
+
+// Delete all checked duplicate copies in one go
+async function deleteSelectedDups(){
+  const keys=Array.from(document.querySelectorAll('.dup-check:checked')).map(c=>c.value);
+  if(!keys.length){ toast('Pehle select karo','err'); return; }
+  if(!confirm('Delete '+keys.length+' selected duplicate copies?\n\nYeh sirf duplicate copies hatayega (keeper safe rahega).')) return;
+  toast('Deleting '+keys.length+'...','inf');
+  try{
+    const r=await api('POST','/admin/delete-duplicates',{ imageKeys: keys });
+    if(r.ok){
+      toast('🗑 Removed '+r.removed+' duplicates','ok');
+      loadStats();
+      loadDuplicates();   // re-scan
+    } else { toast('Error: '+(r.error||'?'),'err'); }
+  }catch(e){ toast('Error: '+e.message,'err'); }
+}
+
+async function renumberTasks(){
+  if(!confirm('Fix all task numbers?\n\nThis renumbers every trained task uniquely (oldest = #1). Use this if you see duplicate numbers after deleting tasks.')) return;
+  toast('Fixing numbers...','inf');
+  try{
+    const d=await api('POST','/admin/renumber');
+    if(d.ok){
+      toast(`✅ Done! ${d.renumbered} tasks renumbered.`,'ok');
+      window._trainedLoaded=false;
+      loadTrained(true);
+      loadStats();
+    } else {
+      toast('Error: '+(d.error||'?'),'err');
+    }
+  }catch(e){ toast('Error: '+e.message,'err'); }
+}
+
+// ── GLOBAL SOLVING ON/OFF ───────────────────────────────────
+function applySolvingBtn(on){
+  const b=document.getElementById('solving-toggle');
+  if(!b) return;
+  if(on){ b.style.background='#22c55e'; b.style.color='#fff'; b.textContent='✅ Solving: ON'; }
+  else  { b.style.background='#ef4444'; b.style.color='#fff'; b.textContent='⛔ Solving: OFF'; }
+}
+async function loadSolvingStatus(){
+  try{ const d=await api('GET','/admin/solving'); applySolvingBtn(d.solvingEnabled!==false); }catch(e){}
+}
+async function toggleSolving(){
+  // read current from button text
+  const b=document.getElementById('solving-toggle');
+  const currentlyOn = b && b.textContent.includes('ON');
+  const next = !currentlyOn;
+  if(!confirm(next
+      ? 'Turn solving ON?\n\nSaari extensions trained tasks solve karna shuru kar dengi.'
+      : 'Turn solving OFF?\n\nKoi bhi extension koi task solve NAHI karegi (training chalti rahegi). Tab tak band rahega jab tak wapas ON na karo.')) return;
+  try{
+    const d=await api('POST','/admin/solving',{ solvingEnabled: next });
+    applySolvingBtn(d.solvingEnabled!==false);
+    toast(d.solvingEnabled!==false ? '✅ Solving ON' : '⛔ Solving OFF','ok');
+  }catch(e){ toast('Error: '+e.message,'err'); }
+}
+
+// ── COMPLAINTS ──────────────────────────────────────────────
+async function loadComplaints(){
+  try{
+    const d=await api('GET','/admin/complaints');
+    window._complaints=d.list||[];
+    renderComplaints();
+  }catch(e){}
+}
+
+function miniGridHTML(rows,cols,selSet,color){
+  let cells='';
+  for(let i=0;i<rows*cols;i++){
+    const on=selSet.has(i);
+    cells+=`<div style="border:1px solid #333;${on?`background:${color};border:2px solid ${color}`:''}"></div>`;
   }
-  saveKB(kb);
-  res.json({ ok: true, stripped, total: Object.keys(kb).length });
-});
-// Tiny internal route the self-ping hits (keeps the server awake).
-app.get('/keepalive', (req, res) => res.json({ ok: true, t: Date.now() }));
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`SquareNet Server v2.1 on port ${PORT}`);
-  try { console.log('Data files:', require('fs').readdirSync(DATA_DIR)); } catch(e) {}
-  // SELF-PING keep-alive: server pings itself every 4 min so Railway never sleeps.
-  // ONE internal request (not per-profile), so no meaningful load. This is what
-  // fixes cold-start "upstream error" on train and slow first solves.
-  const base = process.env.RAILWAY_PUBLIC_DOMAIN
-    ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
-    : (process.env.SELF_URL || `http://127.0.0.1:${PORT}`);
-  setInterval(() => {
-    try {
-      const mod = base.startsWith('https') ? require('https') : require('http');
-      mod.get(base + '/keepalive', r => { r.on('data',()=>{}); r.on('end',()=>{}); })
-         .on('error', ()=>{});
-    } catch(e) {}
-  }, 240000);
-});
+  return `<div style="display:grid;grid-template-columns:repeat(${cols},14px);grid-template-rows:repeat(${rows},14px);gap:2px">${cells}</div>`;
+}
+
+function renderComplaints(){
+  const el=document.getElementById('complaints-list');
+  const items=window._complaints||[];
+  // Badge
+  const badge=document.getElementById('comp-badge');
+  if(badge){ if(items.length){badge.style.display='inline-block';badge.textContent=items.length;}else{badge.style.display='none';} }
+
+  if(!items.length){ el.innerHTML='<div class="no-items">No complaints 🎉</div>'; return; }
+
+  el.innerHTML=items.map(c=>{
+    const rows=c.gridRows||3, cols=c.gridCols||3;
+    const solvedSet=new Set((c.solvedSquares||[]).map(s=>typeof s==='object'?s.index:s));
+    const trainedSet=new Set((c.trainedSquares||[]).map(s=>typeof s==='object'?s.index:s));
+    const solvedGrid = c.noObjectSolved ? '<div style="color:#f59e0b;font-size:12px">🚫 Solved as "Not Found"</div>' : miniGridHTML(rows,cols,solvedSet,'#3b82f6');
+    const trainedGrid = c.trainedNoObject
+      ? '<div style="color:#f59e0b;font-size:12px">🚫 Trained as "Not Found"</div>'
+      : (c.isTrained
+          ? miniGridHTML(rows,cols,trainedSet,'#22c55e')
+          : '<div style="color:#f59e0b;font-size:11px;max-width:140px">Solved by per-square matching (this exact image was never trained as a full task). Train it below to fix.</div>');
+
+    return `
+    <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:12px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div style="font-weight:700;color:#fff">#${c.taskNumber||'?'} — "${c.objectName||'?'}"</div>
+        <button class="btn btn-ghost btn-sm" onclick="deleteComplaint('${c.id}')">🗑 Remove</button>
+      </div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
+        👤 ${c.clientName||'?'} ${c.clientEmail?'('+c.clientEmail+')':''} • 📅 ${fmtDate(c.createdAt)}
+      </div>
+      <div style="display:flex;gap:18px;flex-wrap:wrap;align-items:flex-start">
+        <div style="text-align:center">
+          <img src="${c.imageSrc||''}" style="width:140px;height:140px;object-fit:cover;border-radius:8px" loading="lazy">
+          <div style="font-size:10px;color:var(--muted);margin-top:4px">Task image</div>
+        </div>
+        <div style="text-align:center">
+          ${solvedGrid}
+          <div style="font-size:10px;color:#3b82f6;margin-top:4px">How it solved (client saw)</div>
+        </div>
+        <div style="text-align:center">
+          ${trainedGrid}
+          <div style="font-size:10px;color:#22c55e;margin-top:4px">Your training</div>
+        </div>
+      </div>
+      <button class="btn btn-amber btn-sm" style="margin-top:10px" onclick="openComplaintRetrain('${c.id}')">✏️ ${c.isTrained?'Retrain':'Train'} this exact image</button>
+    </div>`;
+  }).join('');
+}
+
+async function deleteComplaint(id){
+  try{
+    await api('DELETE','/admin/complaints/'+id);
+    window._complaints=(window._complaints||[]).filter(c=>c.id!==id);
+    renderComplaints(); loadStats();
+  }catch(e){ toast('Error','err'); }
+}
+
+async function clearComplaints(){
+  if(!confirm('Clear ALL complaints?')) return;
+  try{
+    await api('POST','/admin/complaints/clear');
+    window._complaints=[]; renderComplaints(); loadStats();
+    toast('Cleared','ok');
+  }catch(e){ toast('Error','err'); }
+}
+
+// Open the trainer modal for the complained task so admin can fix it
+function openComplaintRetrain(id){
+  const c=(window._complaints||[]).find(x=>x.id===id);
+  if(!c) return;
+  const entry={
+    imageKey:c.imageKey, imageSrc:c.imageSrc, objectName:c.objectName,
+    taskText:'', selectedSquares:c.trainedSquares||[], noObject:c.trainedNoObject||false,
+    gridRows:c.gridRows||3, gridCols:c.gridCols||3, taskNumber:c.taskNumber, trainedAt:new Date().toISOString()
+  };
+  openModal(entry);
+}
+
+// Ensure the FULL trained list is loaded (used when searching so results aren't
+// limited to the first page). Cached after the first full load; guarded so it
+// only ever runs ONCE even if called repeatedly (e.g. on every keystroke).
+async function ensureAllTrained(onProgress){
+  if(window._allTrainedLoaded) return;
+  if(window._allTrainedLoading) return window._allTrainedLoading;  // already running → reuse
+  window._allTrainedLoading = (async()=>{
+    let all=[],off=0;
+    try{
+      while(true){
+        const d=await api('GET','/admin/trained?offset='+off+'&limit=200');
+        const list=d.list||[];
+        all=all.concat(list);
+        window._allTrained=all;              // update as we go
+        if(onProgress) onProgress(all.length);
+        if(list.length<200) break;
+        off+=200;
+        if(off>10000) break;
+      }
+      window._allTrained=all;
+      window._allTrainedLoaded=true;
+    }catch(e){ window._allTrained=all; }
+    finally{ window._allTrainedLoading=null; }
+  })();
+  return window._allTrainedLoading;
+}
+
+async function onTrainedSearch(){
+  const q=document.getElementById('search-trained').value.trim();
+  const btn=document.getElementById('trained-more-btn');
+  const el=document.getElementById('trained-list');
+  if(q){
+    if(btn) btn.style.display='none';   // no Load More while searching
+    if(!window._allTrainedLoaded){
+      if(!window._allTrained || !window._allTrained.length){
+        el.innerHTML='<div class="no-items">Loading tasks for search… please wait</div>';
+      }
+      // Load once (guarded); re-render live as tasks arrive. Does NOT restart on
+      // each keystroke.
+      ensureAllTrained(()=>{ if(document.getElementById('search-trained').value.trim()) renderTrained(); });
+    }
+  } else {
+    updateTrainedMore();               // search cleared → restore paged view + Load More
+  }
+  renderTrained();
+}
+
+function renderTrained(){
+  const q=document.getElementById('search-trained').value.toLowerCase().trim();
+  // When searching, filter across the FULL list; otherwise show the paged list.
+  const source = q ? (window._allTrained||trainedData) : trainedData;
+  const items=source.filter(e=>{
+    if(!q) return true;
+    const obj=(e.objectName||'').toLowerCase();
+    const num=String(e.taskNumber||'');
+    // match by object name OR by task number (with or without a leading #)
+    return obj.includes(q) || num===q.replace('#','') || num.includes(q.replace('#',''));
+  });
+  const el=document.getElementById('trained-list');
+  if(!items.length){el.innerHTML='<div class="no-items">Koi trained entry nahi</div>';return;}
+  el.innerHTML=items.map(e=>{
+    const rows=e.gridRows||3, cols=e.gridCols||3;
+    const sel=new Set((e.selectedSquares||[]).map(s=>s.index));
+    let miniCells='';
+    if(!e.noObject){
+      for(let i=0;i<rows*cols;i++){
+        miniCells+=`<div class="mini-cell${sel.has(i)?' mini-sel':''}"></div>`;
+      }
+    }
+    const miniGrid = e.noObject ? '' :
+      `<div class="mini-grid" style="grid-template-columns:repeat(${cols},1fr);grid-template-rows:repeat(${rows},1fr)">${miniCells}</div>`;
+    return `
+    <div class="card" onclick='openModal(${JSON.stringify(e).replace(/'/g,"&#39;")})'>
+      <div class="card-img">
+        <img src="${e.imageSrc||''}" loading="lazy">
+        ${miniGrid}
+        <div class="badge">#${e.taskNumber||'?'}</div>
+        <div class="badge2">${e.noObject?'🚫 No Obj':(e.selectedSquares||[]).length+' sq'}</div>
+      </div>
+      <div class="card-info">
+        <div class="card-obj">#${e.taskNumber||'?'} ${e.noObject?'🚫':'✅'} ${e.objectName||'?'}</div>
+        <div class="card-meta">${fmtDate(e.trainedAt)}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// ── CLIENTS ─────────────────────────────────────────────────────
+async function loadClients(){
+  try{ const d=await api('GET','/admin/clients'); clientsData=d.clients||{}; renderClients(); }catch(e){}
+}
+
+function renderClients(){
+  const clients=Object.values(clientsData);
+  const el=document.getElementById('client-list');
+  if(!clients.length){el.innerHTML='<div class="no-items">Koi client nahi — Add karo</div>';return;}
+  el.innerHTML=clients.map(c=>{
+    const plan=c.plan||1000;
+    const used=c.usedToday||0;
+    const rem=Math.max(0,plan-used);
+    const pct=Math.min(100,Math.round(used/plan*100));
+    // Reset time
+    const now=new Date();
+    const midnight=new Date(now); midnight.setHours(24,0,0,0);
+    const hLeft=Math.round((midnight-now)/3600000);
+    // Plan dates: buy date, expiry date, days left.
+    const buyDate = c.createdAt ? fmtDate(c.createdAt) : '—';
+    const expDate = c.expiresAt ? fmtDate(c.expiresAt) : '—';
+    const dLeft = (c.daysLeft!=null) ? c.daysLeft : null;
+    const expired = !!c.expired;
+    const dColor = expired ? '#ef4444' : (dLeft!=null && dLeft<=3 ? '#f59e0b' : '#22c55e');
+    const dText = (dLeft==null) ? 'No expiry' : (expired ? 'EXPIRED' : dLeft+' days left');
+    return `
+    <div class="client-row">
+      <div class="client-top">
+        <div class="client-name">👤 ${c.name}</div>
+        <span style="font-size:10px;color:${c.active!==false && !expired?'#22c55e':'#ef4444'}">${expired?'●Expired':(c.active!==false?'●Active':'●Inactive')}</span>
+      </div>
+      <div class="client-plan">
+        <div class="cp-item"><div class="cp-val">${rem}</div><div class="cp-lbl">Remaining</div></div>
+        <div class="cp-item"><div class="cp-val">${used}</div><div class="cp-lbl">Used Today</div></div>
+        <div class="cp-item"><div class="cp-val">${hLeft}h</div><div class="cp-lbl">Reset In</div></div>
+      </div>
+      <div class="plan-bar"><div class="plan-fill" style="width:${pct}%"></div></div>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;font-size:11px;margin:8px 0;color:#a78bfa">
+        <span>🛒 Buy: ${buyDate}</span>
+        <span>⏳ Expiry: ${expDate}</span>
+        <span style="color:${dColor};font-weight:700">● ${dText}</span>
+      </div>
+      <div class="client-key">🔑 ${c.apiKey}</div>
+      <div class="client-actions" style="margin-top:8px">
+        <button class="btn btn-ghost btn-sm" onclick="copyKey('${c.apiKey}')">📋 Copy Key</button>
+        <input class="plan-input" id="plan-${c.apiKey}" value="${plan}" type="number">
+        <button class="btn btn-primary btn-sm" onclick="updatePlan('${c.apiKey}')">💾 Plan</button>
+        <button class="btn btn-green btn-sm" onclick="renewClient('${c.apiKey}')">🔄 Renew 30d</button>
+        <button class="btn ${c.active!==false?'btn-amber':'btn-green'} btn-sm" onclick="toggleActive('${c.apiKey}',${c.active!==false})">
+          ${c.active!==false?'⏸ Pause':'▶ Activate'}
+        </button>
+        <button class="btn btn-danger btn-sm" onclick="deleteClient('${c.apiKey}')">🗑</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function createClient(){
+  const name=document.getElementById('new-name').value.trim();
+  const plan=parseInt(document.getElementById('new-plan').value)||1000;
+  if(!name){toast('Name daalo','err');return;}
+  const d=await api('POST','/admin/clients',{name,plan});
+  if(d.ok){
+    toast(`✅ ${d.name} — Key: ${d.apiKey}`,'ok');
+    document.getElementById('new-name').value='';
+    document.getElementById('new-plan').value='';
+    loadClients(); loadStats();
+  }
+}
+
+async function updatePlan(apiKey){
+  const plan=parseInt(document.getElementById('plan-'+apiKey).value)||1000;
+  await api('PATCH','/admin/clients/'+apiKey,{plan});
+  toast('Plan updated!','ok'); loadClients();
+}
+
+async function renewClient(apiKey){
+  if(!confirm('Renew this client for 30 more days from now? This re-activates them.')) return;
+  await api('PATCH','/admin/clients/'+apiKey,{renew:true,durationDays:30});
+  toast('✅ Renewed 30 days','ok'); loadClients();
+}
+
+async function toggleActive(apiKey,currentlyActive){
+  await api('PATCH','/admin/clients/'+apiKey,{active:!currentlyActive});
+  loadClients();
+}
+
+async function deleteClient(apiKey){
+  if(!confirm('Delete?')) return;
+  await api('DELETE','/admin/clients/'+apiKey);
+  loadClients(); loadStats(); toast('Deleted','inf');
+}
+
+function copyKey(key){ navigator.clipboard.writeText(key); toast('API Key copied!','ok'); }
+
+// ── MODAL ────────────────────────────────────────────────────────
+function openModal(entry){
+  modalEntry=entry; selectedCells.clear();
+  if(entry.selectedSquares) entry.selectedSquares.forEach(s=>selectedCells.add(s.index));
+  const num=entry.taskNumber||'?';
+  document.getElementById('modal-title').textContent=`#${num} Train: "${entry.objectName||'?'}"`;
+  document.getElementById('modal-obj').textContent=entry.objectName||'?';
+  document.getElementById('modal-img').src=entry.imageSrc||'';
+  const rows=entry.gridInfo?entry.gridInfo.rows:(entry.gridRows||3);
+  const cols=entry.gridInfo?entry.gridInfo.cols:(entry.gridCols||3);
+  document.getElementById('g-rows').value=rows;
+  document.getElementById('g-cols').value=cols;
+  // Show delete button only if this is an already-trained entry (has trainedAt)
+  const delBtn=document.getElementById('modal-delete-btn');
+  if(delBtn) delBtn.style.display = entry.trainedAt ? 'inline-flex' : 'none';
+  buildGrid();
+  document.getElementById('modal').classList.add('open');
+}
+
+function closeModal(){ document.getElementById('modal').classList.remove('open'); modalEntry=null; selectedCells.clear(); }
+
+function buildGrid(){
+  const rows=parseInt(document.getElementById('g-rows').value)||3;
+  const cols=parseInt(document.getElementById('g-cols').value)||3;
+  const ov=document.getElementById('grid-ov');
+  ov.style.gridTemplateRows=`repeat(${rows},1fr)`;
+  ov.style.gridTemplateColumns=`repeat(${cols},1fr)`;
+  ov.innerHTML='';
+  for(let i=0;i<rows*cols;i++){
+    const c=document.createElement('div');
+    c.className='cell'+(selectedCells.has(i)?' sel':'');
+    c.addEventListener('click',()=>{ if(selectedCells.has(i)){selectedCells.delete(i);c.classList.remove('sel');}else{selectedCells.add(i);c.classList.add('sel');} updateSel(); });
+    ov.appendChild(c);
+  }
+  updateSel();
+}
+
+function clearSel(){ selectedCells.clear(); document.querySelectorAll('.cell').forEach(c=>c.classList.remove('sel')); updateSel(); }
+function updateSel(){ document.getElementById('sel-count').textContent=selectedCells.size+' selected'; }
+
+async function saveTrain(noObject){
+  if(!modalEntry) return;
+  if(!noObject&&selectedCells.size===0){toast('Squares select karo!','err');return;}
+  const rows=parseInt(document.getElementById('g-rows').value)||3;
+  const cols=parseInt(document.getElementById('g-cols').value)||3;
+  const taskNumber=modalEntry.taskNumber||(taskCounter+1);
+  const entry=modalEntry;                       // capture before closing
+  const objName=entry.objectName;
+  // IMPORTANT: copy selected cells NOW — closeModal() clears selectedCells
+  const cellsCopy=[...selectedCells];
+  const selectedSquares=noObject?[]:cellsCopy.map(i=>({index:i}));
+
+  // 1) Close modal & remove the task from the unsolved list IMMEDIATELY (feels instant)
+  closeModal();
+  window._recentlyTrained.add(entry.imageKey);   // prevent auto-refresh flicker
+  unsolvedData = unsolvedData.filter(e=>e.imageKey!==entry.imageKey);
+  renderUnsolved(); updateLoadMore();
+  toast(`✅ #${taskNumber} "${objName}" trained!`,'ok');
+
+  // Add to local trained list right away so its training shows immediately
+  const trainedEntry={
+    imageKey:entry.imageKey, imageSrc:entry.imageSrc, objectName:objName,
+    taskText:entry.taskText||'', selectedSquares, noObject:noObject||false,
+    gridRows:rows, gridCols:cols, taskNumber, trainedAt:new Date().toISOString()
+  };
+  // Remove any old version of this task, add the new one at the top
+  trainedData = trainedData.filter(e=>e.imageKey!==entry.imageKey);
+  trainedData.unshift(trainedEntry);
+  if(window._trainedLoaded) renderTrained();
+
+  // 2) Do the heavy work (pHash + save) in the background
+  try{
+    const squarePHashes=await buildPHashes(entry.imageSrc,rows,cols,noObject,cellsCopy);
+    const d=await api('POST','/admin/train',{
+      imageKey:entry.imageKey, imageSrc:entry.imageSrc,
+      objectName:objName, taskText:entry.taskText||'',
+      selectedSquares,
+      noObject, gridRows:rows, gridCols:cols, squarePHashes
+    });
+    if(d.ok){
+      // Server decides the real, unique task number — sync our local copy to it
+      if(d.taskNumber && d.taskNumber!==taskNumber){
+        const t=trainedData.find(e=>e.imageKey===entry.imageKey);
+        if(t){ t.taskNumber=d.taskNumber; if(window._trainedLoaded) renderTrained(); }
+      }
+      loadStats();
+    } else {
+      window._recentlyTrained.delete(entry.imageKey);  // allow it back
+      trainedData = trainedData.filter(e=>e.imageKey!==entry.imageKey);
+      toast('Save failed: '+(d.error||'?'),'err');
+      loadUnsolved();                // restore the task if save failed
+    }
+  }catch(e){
+    window._recentlyTrained.delete(entry.imageKey);
+    trainedData = trainedData.filter(e=>e.imageKey!==entry.imageKey);
+    toast('Save error: '+e.message,'err'); loadUnsolved();
+  }
+}
+
+async function deleteTrained(){
+  if(!modalEntry||!modalEntry.imageKey){toast('Cannot delete — no key','err');return;}
+  if(!confirm(`Delete trained task #${modalEntry.taskNumber||'?'} "${modalEntry.objectName||'?'}"?\n\nThis cannot be undone.`)) return;
+  const entry=modalEntry;
+  // Remove from trained list UI immediately
+  closeModal();
+  trainedData = trainedData.filter(e=>e.imageKey!==entry.imageKey);
+  renderTrained();
+  toast('🗑 Deleted','ok');
+  try{
+    const d=await api('DELETE','/admin/trained/'+encodeURIComponent(entry.imageKey));
+    if(d.ok){ loadStats(); }
+    else { toast('Delete failed: '+(d.error||'?'),'err'); loadTrained(true); }
+  }catch(e){ toast('Delete error: '+e.message,'err'); loadTrained(true); }
+}
+
+async function buildPHashes(src,rows,cols,noObject,cellsCopy){
+  const selSet = new Set(cellsCopy || [...selectedCells]);
+  return new Promise(resolve=>{
+    const img=new Image();
+    img.onload=()=>{
+      const cw=Math.floor(img.width/cols),ch=Math.floor(img.height/rows);
+      const results=[]; let idx=0;
+      for(let r=0;r<rows;r++) for(let c=0;c<cols;c++){
+        const canvas=document.createElement('canvas'); canvas.width=8; canvas.height=8;
+        const ctx=canvas.getContext('2d'); ctx.drawImage(img,c*cw,r*ch,cw,ch,0,0,8,8);
+        let hash='';
+        try{
+          const data=ctx.getImageData(0,0,8,8).data;
+          const gray=[]; for(let i=0;i<data.length;i+=4) gray.push(data[i]*.299+data[i+1]*.587+data[i+2]*.114);
+          const avg=gray.reduce((a,b)=>a+b,0)/gray.length;
+          hash=gray.map(g=>g>avg?'1':'0').join('');
+        }catch(e){}
+        results.push({index:idx,hash,isObject:!noObject&&selSet.has(idx)}); idx++;
+      }
+      resolve(results);
+    };
+    img.onerror=()=>resolve([]);
+    img.src=src;
+  });
+}
+
+function fmtDate(iso){
+  if(!iso) return '—';
+  const d=new Date(iso);
+  return d.toLocaleDateString()+' '+d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+}
+
+function toast(msg,type='inf'){
+  const old=document.querySelector('.toast'); if(old) old.remove();
+  const el=document.createElement('div');
+  el.className='toast t'+type; el.textContent=msg;
+  document.body.appendChild(el);
+  setTimeout(()=>el.remove(),3500);
+}
+</script>
+</body>
+</html>
