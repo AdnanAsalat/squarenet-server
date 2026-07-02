@@ -607,7 +607,11 @@ app.post('/admin/train', (req, res) => {
       }
     }
   }
-  kb[imageKey] = { objectName:objectName||'', imageSrc:imageSrc||'',
+  // kb.json is used only for solving (object + cellHashes + answer). It does NOT
+  // need the image — storing the big base64 here too doubled the file size and
+  // made every save slow enough to hit Railway's 502 timeout. The image is kept
+  // in trained.json (for the dashboard). This keeps kb.json small and saves fast.
+  kb[imageKey] = { objectName:objectName||'',
     noObject:noObject||false, selectedSquares:selectedSquares||[],
     gridRows:gridRows||3, gridCols:gridCols||3, cellHashes,
     taskNumber, trainedAt:new Date().toISOString() };
@@ -675,6 +679,19 @@ app.delete('/admin/clients/:apiKey', (req, res) => {
   delete clients[req.params.apiKey];
   saveClients(clients);
   res.json({ ok: true });
+});
+// One-time: strip images (imageSrc) out of kb.json to shrink it. kb.json is only
+// used for solving and doesn't need images (they live in trained.json). Run once
+// after deploy to fix the slow-save / 502 problem on an already-bloated kb.json.
+app.post('/admin/shrink-kb', (req, res) => {
+  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
+  const kb = getKB();
+  let stripped = 0;
+  for (const k of Object.keys(kb)) {
+    if (kb[k] && kb[k].imageSrc) { delete kb[k].imageSrc; stripped++; }
+  }
+  saveKB(kb);
+  res.json({ ok: true, stripped, total: Object.keys(kb).length });
 });
 // Tiny internal route the self-ping hits (keeps the server awake).
 app.get('/keepalive', (req, res) => res.json({ ok: true, t: Date.now() }));
