@@ -680,6 +680,17 @@ app.delete('/admin/clients/:apiKey', (req, res) => {
   saveClients(clients);
   res.json({ ok: true });
 });
+// Free disk space by clearing the OLD, UNUSED squareKB (per-square pHash data).
+// Solving now uses content-matching (cellHashes) via /api/solve — squareKB is not
+// used for matching at all. This ONLY empties square_kb.json; it does NOT touch
+// trained.json, kb.json, solving, or any task. 100% safe for trained data.
+app.post('/admin/clear-squarekb', (req, res) => {
+  if (!isAdmin(req)) return res.status(401).json({ error: 'Unauthorized' });
+  const before = Object.keys(getSquareKB()).length;
+  saveSquareKB({});
+  _squareKBCache = {};
+  res.json({ ok: true, cleared: before });
+});
 // One-time: strip images (imageSrc) out of kb.json to shrink it. kb.json is only
 // used for solving and doesn't need images (they live in trained.json). Run once
 // after deploy to fix the slow-save / 502 problem on an already-bloated kb.json.
