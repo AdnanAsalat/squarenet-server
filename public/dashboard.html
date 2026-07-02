@@ -325,6 +325,9 @@ function initApp(){
   loadStats(); loadUnsolved(); loadSolvingStatus();
   // Note: the duplicate scan is heavy, so we do NOT run it on load or on the
   // auto-refresh — it runs only when you open the Duplicates tab.
+  // Warm up the full trained list in the background (a few seconds after load)
+  // so search is instant when you use it — without slowing the initial load.
+  setTimeout(()=>{ ensureAllTrained(); }, 3000);
   // Auto-refresh ONLY the unsolved tab. Skip while the train modal is open so
   // training stays smooth (no list reload / image re-fetch mid-train).
   setInterval(()=>{
@@ -419,6 +422,7 @@ function renderUnsolved(){
 
 async function loadTrained(force){
   try{
+    if(force){ window._allTrainedLoaded=false; window._allTrained=null; }  // refresh search cache
     // Load first page only (fast). More load on demand via "Load More".
     const d=await api('GET','/admin/trained?offset=0&limit=60');
     trainedData=d.list||[];
@@ -743,28 +747,32 @@ function openComplaintRetrain(id){
 }
 
 // Ensure the FULL trained list is loaded (used when searching so results aren't
-// limited to the first page). Cached after the first full load. Shows progress
-// and renders as it goes so it never looks frozen.
+// limited to the first page). Cached after the first full load; guarded so it
+// only ever runs ONCE even if called repeatedly (e.g. on every keystroke).
 async function ensureAllTrained(onProgress){
   if(window._allTrainedLoaded) return;
-  let all=[],off=0;
-  try{
-    while(true){
-      const d=await api('GET','/admin/trained?offset='+off+'&limit=200');
-      const list=d.list||[];
-      all=all.concat(list);
-      window._allTrained=all;              // update as we go
-      if(onProgress) onProgress(all.length);
-      if(list.length<200) break;
-      off+=200;
-      if(off>10000) break;
-    }
-    window._allTrained=all;
-    window._allTrainedLoaded=true;
-  }catch(e){ window._allTrained=all; }
+  if(window._allTrainedLoading) return window._allTrainedLoading;  // already running → reuse
+  window._allTrainedLoading = (async()=>{
+    let all=[],off=0;
+    try{
+      while(true){
+        const d=await api('GET','/admin/trained?offset='+off+'&limit=200');
+        const list=d.list||[];
+        all=all.concat(list);
+        window._allTrained=all;              // update as we go
+        if(onProgress) onProgress(all.length);
+        if(list.length<200) break;
+        off+=200;
+        if(off>10000) break;
+      }
+      window._allTrained=all;
+      window._allTrainedLoaded=true;
+    }catch(e){ window._allTrained=all; }
+    finally{ window._allTrainedLoading=null; }
+  })();
+  return window._allTrainedLoading;
 }
 
-let _searchTimer=null;
 async function onTrainedSearch(){
   const q=document.getElementById('search-trained').value.trim();
   const btn=document.getElementById('trained-more-btn');
@@ -772,9 +780,12 @@ async function onTrainedSearch(){
   if(q){
     if(btn) btn.style.display='none';   // no Load More while searching
     if(!window._allTrainedLoaded){
-      el.innerHTML='<div class="no-items">Loading all tasks for search… please wait</div>';
-      // Load full list, re-rendering results live as more tasks arrive.
-      await ensureAllTrained(()=>{ if(document.getElementById('search-trained').value.trim()) renderTrained(); });
+      if(!window._allTrained || !window._allTrained.length){
+        el.innerHTML='<div class="no-items">Loading tasks for search… please wait</div>';
+      }
+      // Load once (guarded); re-render live as tasks arrive. Does NOT restart on
+      // each keystroke.
+      ensureAllTrained(()=>{ if(document.getElementById('search-trained').value.trim()) renderTrained(); });
     }
   } else {
     updateTrainedMore();               // search cleared → restore paged view + Load More
@@ -840,11 +851,18 @@ function renderClients(){
     const now=new Date();
     const midnight=new Date(now); midnight.setHours(24,0,0,0);
     const hLeft=Math.round((midnight-now)/3600000);
+    // Plan dates: buy date, expiry date, days left.
+    const buyDate = c.createdAt ? fmtDate(c.createdAt) : '—';
+    const expDate = c.expiresAt ? fmtDate(c.expiresAt) : '—';
+    const dLeft = (c.daysLeft!=null) ? c.daysLeft : null;
+    const expired = !!c.expired;
+    const dColor = expired ? '#ef4444' : (dLeft!=null && dLeft<=3 ? '#f59e0b' : '#22c55e');
+    const dText = (dLeft==null) ? 'No expiry' : (expired ? 'EXPIRED' : dLeft+' days left');
     return `
     <div class="client-row">
       <div class="client-top">
         <div class="client-name">👤 ${c.name}</div>
-        <span style="font-size:10px;color:${c.active!==false?'#22c55e':'#ef4444'}">${c.active!==false?'●Active':'●Inactive'}</span>
+        <span style="font-size:10px;color:${c.active!==false && !expired?'#22c55e':'#ef4444'}">${expired?'●Expired':(c.active!==false?'●Active':'●Inactive')}</span>
       </div>
       <div class="client-plan">
         <div class="cp-item"><div class="cp-val">${rem}</div><div class="cp-lbl">Remaining</div></div>
@@ -852,11 +870,17 @@ function renderClients(){
         <div class="cp-item"><div class="cp-val">${hLeft}h</div><div class="cp-lbl">Reset In</div></div>
       </div>
       <div class="plan-bar"><div class="plan-fill" style="width:${pct}%"></div></div>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;font-size:11px;margin:8px 0;color:#a78bfa">
+        <span>🛒 Buy: ${buyDate}</span>
+        <span>⏳ Expiry: ${expDate}</span>
+        <span style="color:${dColor};font-weight:700">● ${dText}</span>
+      </div>
       <div class="client-key">🔑 ${c.apiKey}</div>
       <div class="client-actions" style="margin-top:8px">
         <button class="btn btn-ghost btn-sm" onclick="copyKey('${c.apiKey}')">📋 Copy Key</button>
         <input class="plan-input" id="plan-${c.apiKey}" value="${plan}" type="number">
         <button class="btn btn-primary btn-sm" onclick="updatePlan('${c.apiKey}')">💾 Plan</button>
+        <button class="btn btn-green btn-sm" onclick="renewClient('${c.apiKey}')">🔄 Renew 30d</button>
         <button class="btn ${c.active!==false?'btn-amber':'btn-green'} btn-sm" onclick="toggleActive('${c.apiKey}',${c.active!==false})">
           ${c.active!==false?'⏸ Pause':'▶ Activate'}
         </button>
@@ -883,6 +907,12 @@ async function updatePlan(apiKey){
   const plan=parseInt(document.getElementById('plan-'+apiKey).value)||1000;
   await api('PATCH','/admin/clients/'+apiKey,{plan});
   toast('Plan updated!','ok'); loadClients();
+}
+
+async function renewClient(apiKey){
+  if(!confirm('Renew this client for 30 more days from now? This re-activates them.')) return;
+  await api('PATCH','/admin/clients/'+apiKey,{renew:true,durationDays:30});
+  toast('✅ Renewed 30 days','ok'); loadClients();
 }
 
 async function toggleActive(apiKey,currentlyActive){
